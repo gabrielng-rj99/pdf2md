@@ -95,5 +95,4 @@ docs/
 
 ---
 
-**Última atualização:** Dezembro 2024
 **Status:** ✅ Pronto para usar
