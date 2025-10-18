@@ -63,8 +63,12 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     try:
         # Salvar PDF temporário
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Arquivo está vazio ou corrompido.")
+
         with open(pdf_path, "wb") as f:
-            f.write(await file.read())
+            f.write(content)
 
         # Processar PDF
         md_filename, img_dir = process_pdf(pdf_path, OUTPUT_DIR)
@@ -80,7 +84,12 @@ async def upload_pdf(file: UploadFile = File(...)):
             "zip_file": zip_filename,
             "download_url": f"/api/download-zip/{zip_filename}"
         })
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        print(f"❌ Erro ao processar PDF: {error_msg}")
         raise HTTPException(status_code=500, detail=f"Erro ao processar PDF: {str(e)}")
 
 @app.post("/api/upload-multiple/", summary="Envie múltiplos PDFs e receba um ZIP consolidado")
@@ -93,27 +102,30 @@ async def upload_multiple_pdfs(files: list[UploadFile] = File(...)):
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="Nenhum arquivo foi enviado.")
 
-    # Validar todos os arquivos
+    # Validar e salvar arquivos em uma única passagem
     pdf_paths = []
-    for file in files:
-        if not file.filename or not file.filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail=f"Arquivo '{file.filename}' não é um PDF válido.")
-
-        # Validar tamanho do arquivo
-        if file.size and file.size > MAX_FILE_SIZE_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Arquivo '{file.filename}' excede o tamanho máximo de {MAX_FILE_SIZE_MB}MB"
-            )
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     try:
-        # Salvar PDFs temporários
         for file in files:
+            # Validar extensão
+            if not file.filename or not file.filename.lower().endswith(".pdf"):
+                raise HTTPException(status_code=400, detail=f"Arquivo '{file.filename}' não é um PDF válido.")
+
+            # Validar tamanho do arquivo
+            if file.size and file.size > MAX_FILE_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Arquivo '{file.filename}' excede o tamanho máximo de {MAX_FILE_SIZE_MB}MB"
+                )
+
+            # Salvar PDF temporário
             pdf_path = os.path.join(OUTPUT_DIR, file.filename)
             with open(pdf_path, "wb") as f:
-                f.write(await file.read())
+                content = await file.read()
+                if not content:
+                    raise HTTPException(status_code=400, detail=f"Arquivo '{file.filename}' está vazio.")
+                f.write(content)
             pdf_paths.append(pdf_path)
 
         # Processar múltiplos PDFs
@@ -124,6 +136,8 @@ async def upload_multiple_pdfs(files: list[UploadFile] = File(...)):
             "zip_file": zip_filename,
             "download_url": f"/api/download-zip/{zip_filename}"
         })
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao processar PDFs: {str(e)}")
 
