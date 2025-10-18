@@ -388,7 +388,7 @@ jobs:
       - uses: actions/checkout@v2
       - uses: actions/setup-python@v2
         with:
-          python-version: '3.9'
+          python-version: '3.13.7'
       - run: pip install -r requirements.txt
       - run: pytest tests/unit tests/integration --cov=app
       - run: coverage report --fail-under=80

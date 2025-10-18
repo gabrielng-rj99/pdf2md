@@ -2,7 +2,7 @@
 
 Converta PDFs em Markdown com extração automática e inteligente de imagens. 🎯
 
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/downloads/)
+[![Python 3.13.7](https://img.shields.io/badge/Python-3.13.7-blue)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-green)](https://fastapi.tiangolo.com/)
 [![PyMuPDF](https://img.shields.io/badge/PyMuPDF-1.24.1-orange)](https://pymupdf.readthedocs.io/)
 [![Tests](https://img.shields.io/badge/Tests-66%2F66%20✅-brightgreen)](https://github.com/gabrielng-rj99/pdf2md)
@@ -45,7 +45,7 @@ Converta PDFs em Markdown com extração automática e inteligente de imagens. �
 ### Prerequisitos
 
 - **Docker** e **Docker Compose** (recomendado)
-- **Python 3.8+** (para desenvolvimento sem Docker)
+- **Python 3.13.7** (para desenvolvimento sem Docker)
 - **Git**
 
 ### Com Docker (Recomendado)
@@ -385,7 +385,7 @@ flake8==6.1.0                     # Linter
 ### Docker
 
 ```
-Python 3.11 (slim)
+Python 3.13.7 (slim)
 Nginx (stable)
 ```
 
@@ -661,8 +661,8 @@ cat config.ini | grep max_file_size
 
 **Problema**: Testes falhando com Pillow
 ```bash
-# Solução: Usar Python 3.11/3.12 (não 3.13)
-python3.11 -m venv .venv
+# Python 3.13.7 (testado e funciona)
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -796,7 +796,7 @@ Tem dúvidas?
 | **Tipo** | Self-Host |
 | **Status** | Estável ✅ |
 | **Testes** | 66/66 ✅ |
-| **Python** | 3.8+ |
+| **Python** | 3.13.7 |
 | **FastAPI** | 0.109.0 |
 | **PyMuPDF** | 1.24.1 |
 | **Docker** | Sim ✅ |
