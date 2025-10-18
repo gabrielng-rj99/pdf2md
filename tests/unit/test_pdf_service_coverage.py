@@ -40,8 +40,8 @@ def temp_dir():
 def sample_pdf(temp_dir):
     """Cria um PDF de amostra para testes"""
     pdf_path = os.path.join(temp_dir, "sample.pdf")
-    doc = fitz.open()
-    page = doc.new_page()
+    doc: any = fitz.open()  # type: ignore
+    page = doc.new_page()  # type: ignore
     page.insert_text((50, 50), "Título Principal", fontsize=20, color=(0, 0, 0))
     page.insert_text((50, 100), "Este é um parágrafo normal.")
     page.insert_text((50, 150), "Figura 1: Uma imagem importante")
@@ -55,8 +55,8 @@ def sample_pdf(temp_dir):
 @pytest.fixture
 def sample_image(temp_dir):
     """Cria uma imagem de amostra"""
-    doc = fitz.open()
-    page = doc.new_page()
+    doc: any = fitz.open()  # type: ignore
+    page = doc.new_page()  # type: ignore
     page.draw_circle((150, 150), 50, color=(0, 0, 0), fill=(1, 0, 0))
 
     img_dir = os.path.join(temp_dir, "images")
@@ -88,8 +88,8 @@ class TestCalculateImageHash:
         """Arquivos diferentes devem ter hashes diferentes"""
         # Criar segundo arquivo
         img2_path = os.path.join(temp_dir, "image2.png")
-        doc = fitz.open()
-        page = doc.new_page()
+        doc: any = fitz.open()  # type: ignore
+        page = doc.new_page()  # type: ignore
         page.draw_rect((50, 50, 100, 100), color=(0, 0, 1), fill=(0, 1, 0))
         pix = page.get_pixmap()
         pix.save(img2_path)
@@ -435,8 +435,8 @@ class TestProcessMultiplePdfs:
     def test_process_multiple_pdfs_returns_filename(self, temp_dir, sample_pdf):
         """Deve retornar nome de arquivo ZIP"""
         pdf2_path = os.path.join(temp_dir, "sample2.pdf")
-        doc = fitz.open()
-        page = doc.new_page()
+        doc: any = fitz.open()  # type: ignore
+        page = doc.new_page()  # type: ignore
         page.insert_text((50, 50), "Segundo PDF")
         doc.save(pdf2_path)
         doc.close()
@@ -453,8 +453,8 @@ class TestProcessMultiplePdfs:
     def test_process_multiple_pdfs_creates_output(self, temp_dir, sample_pdf):
         """Deve criar arquivos de saída"""
         pdf2_path = os.path.join(temp_dir, "sample2.pdf")
-        doc = fitz.open()
-        page = doc.new_page()
+        doc: any = fitz.open()  # type: ignore
+        page = doc.new_page()  # type: ignore
         page.insert_text((50, 50), "Segundo PDF")
         doc.save(pdf2_path)
         doc.close()
@@ -470,8 +470,8 @@ class TestProcessMultiplePdfs:
         """Deve consolidar múltiplos PDFs em um único ZIP"""
         # Criar segundo PDF
         pdf2_path = os.path.join(temp_dir, "sample2.pdf")
-        doc = fitz.open()
-        page = doc.new_page()
+        doc: any = fitz.open()  # type: ignore
+        page = doc.new_page()  # type: ignore
         page.insert_text((50, 50), "Segundo PDF")
         doc.save(pdf2_path)
         doc.close()

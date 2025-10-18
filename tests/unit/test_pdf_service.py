@@ -14,8 +14,8 @@ class TestProcessPdfBasics:
         """Cria um PDF de teste temporário"""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdf_path = os.path.join(tmpdir, "test.pdf")
-            doc = fitz.open()
-            page = doc.new_page()
+            doc: any = fitz.open()  # type: ignore
+            page = doc.new_page()  # type: ignore
             page.insert_text((50, 50), "Teste de PDF")
             doc.save(pdf_path)
             doc.close()
@@ -93,8 +93,8 @@ class TestProcessPdfWithImages:
         """Cria PDF com imagem de teste"""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdf_path = os.path.join(tmpdir, "test_with_image.pdf")
-            doc = fitz.open()
-            page = doc.new_page()
+            doc: any = fitz.open()  # type: ignore
+            page = doc.new_page()  # type: ignore
 
             # Adiciona texto
             page.insert_text((50, 50), "Documento com imagem")
@@ -152,10 +152,10 @@ class TestProcessPdfFiltering:
         """Cria PDF com cabeçalho e rodapé"""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdf_path = os.path.join(tmpdir, "test_headers.pdf")
-            doc = fitz.open()
+            doc: any = fitz.open()  # type: ignore
 
             for page_num in range(3):
-                page = doc.new_page()
+                page = doc.new_page()  # type: ignore
 
                 # Simula cabeçalho (retângulo no topo)
                 header_rect = fitz.Rect(0, 0, 595, 50)
@@ -205,7 +205,7 @@ class TestProcessPdfErrorHandling:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Criar um PDF válido
             pdf_path = os.path.join(tmpdir, "test.pdf")
-            doc = fitz.open()
+            doc: any = fitz.open()  # type: ignore
             doc.new_page()
             doc.save(pdf_path)
             doc.close()
@@ -226,7 +226,7 @@ class TestProcessPdfErrorHandling:
         """Deve lidar com PDF vazio"""
         with tempfile.TemporaryDirectory() as tmpdir:
             pdf_path = os.path.join(tmpdir, "empty.pdf")
-            doc = fitz.open()
+            doc: any = fitz.open()  # type: ignore
             doc.new_page()  # Página em branco
             doc.save(pdf_path)
             doc.close()

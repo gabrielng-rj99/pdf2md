@@ -75,7 +75,13 @@ class TestMarkdownFormatterInit:
         formatter1 = MarkdownFormatter()
         formatter2 = MarkdownFormatter()
 
-        formatter1.blocks.append("test")
+        block = TextBlock(
+            content="test",
+            block_type="paragraph",
+            page_num=1,
+            position=(0, 0, 100, 30),
+        )
+        formatter1.blocks.append(block)
         assert formatter2.blocks == []
 
 
