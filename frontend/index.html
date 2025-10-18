@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pt-br">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>PDF para Markdown</title>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>📄 PDF → Markdown</h1>
+                <p class="subtitle">
+                    Converta PDFs em Markdown com extração automática de imagens
+                </p>
+            </div>
+
+            <div class="upload-section">
+                <form id="uploadForm">
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-icon">📁</div>
+                        <div class="upload-text">
+                            Clique para selecionar ou arraste PDFs
+                        </div>
+                        <div class="upload-subtext">
+                            Máximo 500MB (múltiplos arquivos suportados)
+                        </div>
+                        <input
+                            type="file"
+                            id="pdfFile"
+                            accept=".pdf"
+                            multiple
+                            required
+                        />
+                    </div>
+                    <div id="fileName" class="file-name"></div>
+                    <div class="button-group">
+                        <button
+                            type="submit"
+                            class="btn-primary"
+                            id="submitBtn"
+                        >
+                            Converter PDFs
+                        </button>
+                        <button
+                            type="button"
+                            class="btn-secondary"
+                            id="resetBtn"
+                            style="display: none"
+                        >
+                            Limpar
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <div id="loading" class="loading hidden">
+                <div class="spinner"></div>
+                <p>Processando PDFs...</p>
+            </div>
+
+            <div id="error" class="error hidden">
+                <div class="error-header">
+                    <span>❌ Erro</span>
+                    <button type="button" id="closeErrorBtn" class="close-btn">
+                        ×
+                    </button>
+                </div>
+                <p id="errorMessage"></p>
+            </div>
+
+            <div id="result" class="result-section hidden">
+                <div class="result-header">
+                    <span>✅ Sucesso!</span>
+                    <button type="button" id="closeResultBtn" class="close-btn">
+                        ×
+                    </button>
+                </div>
+                <div id="resultMessage" class="result-message"></div>
+                <a id="downloadLink" class="btn-download" download>
+                    📦 Baixar ZIP Consolidado
+                </a>
+            </div>
+        </div>
+
+        <script src="script.js"></script>
+    </body>
+</html>
