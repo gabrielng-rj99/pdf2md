@@ -1,0 +1,70 @@
+version: "3.8"
+
+###########################
+# docker-compose for PDF-to-Markdown-with-Images
+# - app: internal network only (8000/tcp) - NOT exposed to host
+# - nginx: bridges internal and external networks - ONLY exposes ports to host
+###########################
+
+services:
+    app:
+        build:
+            context: ..
+            dockerfile: deploy/Dockerfile
+        image: "${APP_IMAGE:-extract-pdf:latest}"
+        container_name: "${APP_CONTAINER_NAME:-extract-pdf}"
+        restart: unless-stopped
+        environment:
+            - ENV=${ENV:-production}
+            - PYTHONUNBUFFERED=1
+            - GUNICORN_WORKERS=${GUNICORN_WORKERS:-4}
+        # Do NOT expose to host - only internal network
+        expose:
+            - "${APP_INTERNAL_PORT:-8000}"
+        # App is ONLY on the internal network (private)
+        networks:
+            app_internal:
+                ipv4_address: ${APP_INTERNAL_IP:-172.18.0.200}
+        volumes:
+            - ${HOST_OUTPUT_DIR:-../output}:/app/output:rw
+            - ${HOST_CONFIG_INI:-../config.ini}:/app/config.ini:ro
+            - ${HOST_TEST_FILES_DIR:-../test_files}:/app/test_files:ro
+
+    nginx:
+        image: "${NGINX_IMAGE:-nginx:stable}"
+        container_name: "${NGINX_CONTAINER_NAME:-extract-pdf-nginx}"
+        restart: unless-stopped
+        depends_on:
+            - app
+        # Nginx is on BOTH networks: internal (to reach app) and external (to expose to host)
+        networks:
+            app_internal:
+                ipv4_address: ${NGINX_INTERNAL_IP:-172.18.0.201}
+            app_external:
+                ipv4_address: ${NGINX_EXTERNAL_IP:-172.19.0.100}
+        volumes:
+            - ./nginx/conf.d:/etc/nginx/conf.d:ro
+            - ${CERT_DIR:-./certs}:/etc/nginx/certs:ro
+            - ./log:/var/log/nginx:rw
+        # ONLY nginx exposes ports to the host
+        ports:
+            - "${HOST_BIND_IP:-0.0.0.0}:${EXPOSE_HTTP_PORT:-80}:${EXPOSE_HTTP_PORT:-80}"
+            - "${HOST_BIND_IP:-0.0.0.0}:${EXPOSE_HTTPS_PORT:-443}:${EXPOSE_HTTPS_PORT:-443}"
+
+# Networks
+networks:
+    # Internal network (private) - only app and nginx
+    app_internal:
+        driver: bridge
+        ipam:
+            config:
+                - subnet: ${INTERNAL_NETWORK_SUBNET:-172.18.0.0/24}
+                  gateway: ${INTERNAL_NETWORK_GATEWAY:-172.18.0.1}
+
+    # External network (public) - nginx bridges to this
+    app_external:
+        driver: bridge
+        ipam:
+            config:
+                - subnet: ${EXTERNAL_NETWORK_SUBNET:-172.19.0.0/24}
+                  gateway: ${EXTERNAL_NETWORK_GATEWAY:-172.19.0.1}
