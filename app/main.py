@@ -67,8 +67,19 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not content:
             raise HTTPException(status_code=400, detail="Arquivo está vazio ou corrompido.")
 
-        with open(pdf_path, "wb") as f:
-            f.write(content)
+        try:
+            with open(pdf_path, "wb") as f:
+                f.write(content)
+        except PermissionError:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro: Permissão negada ao escrever arquivo. Verifique permissões do diretório de saída ({OUTPUT_DIR})."
+            )
+        except IOError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro de I/O ao salvar arquivo: {str(e)}"
+            )
 
         # Processar PDF
         md_filename, img_dir = process_pdf(pdf_path, OUTPUT_DIR)
@@ -121,11 +132,22 @@ async def upload_multiple_pdfs(files: list[UploadFile] = File(...)):
 
             # Salvar PDF temporário
             pdf_path = os.path.join(OUTPUT_DIR, file.filename)
-            with open(pdf_path, "wb") as f:
-                content = await file.read()
-                if not content:
-                    raise HTTPException(status_code=400, detail=f"Arquivo '{file.filename}' está vazio.")
-                f.write(content)
+            try:
+                with open(pdf_path, "wb") as f:
+                    content = await file.read()
+                    if not content:
+                        raise HTTPException(status_code=400, detail=f"Arquivo '{file.filename}' está vazio.")
+                    f.write(content)
+            except PermissionError as pe:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Erro: Permissão negada ao escrever arquivo '{file.filename}'. Verifique permissões do diretório de saída ({OUTPUT_DIR})."
+                )
+            except IOError as ie:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Erro ao salvar arquivo '{file.filename}': {str(ie)}"
+                )
             pdf_paths.append(pdf_path)
 
         # Processar múltiplos PDFs
@@ -139,6 +161,9 @@ async def upload_multiple_pdfs(files: list[UploadFile] = File(...)):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        print(f"❌ Erro ao processar múltiplos PDFs: {error_msg}")
         raise HTTPException(status_code=500, detail=f"Erro ao processar PDFs: {str(e)}")
 
 @app.get("/api/download/{filename}", summary="Baixe o Markdown gerado")

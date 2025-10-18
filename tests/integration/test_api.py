@@ -457,5 +457,180 @@ class TestEndToEnd:
             assert has_md, "ZIP deve conter MD"
 
 
+class TestUploadMultiple:
+    """Testes específicos para o endpoint /api/upload-multiple/"""
+
+    def test_upload_multiple_empty_list(self, client):
+        """Deve rejeitar lista vazia de arquivos"""
+        response = client.post("/api/upload-multiple/", files=[])
+        # FastAPI retorna 422 para lista vazia (Unprocessable Entity)
+        assert response.status_code in [400, 422]
+        data = response.json()
+        assert "detail" in data
+
+    def test_upload_multiple_single_pdf(self, client, temp_pdf):
+        """Deve processar um único PDF via upload-multiple"""
+        with open(temp_pdf, "rb") as f:
+            files = [("files", ("test.pdf", f, "application/pdf"))]
+            response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "zip_file" in data
+        assert "download_url" in data
+
+    def test_upload_multiple_two_pdfs(self, client, temp_output_dir):
+        """Deve processar dois PDFs em um único upload"""
+        import fitz
+
+        # Criar dois PDFs
+        pdfs = []
+        for i in range(2):
+            pdf_path = os.path.join(temp_output_dir, f"test_multi_{i}.pdf")
+            doc = fitz.open()
+            page = doc.new_page()
+            page.insert_text((50, 50), f"Documento {i}")
+            page.insert_text((50, 100), f"Figura 1: Teste {i}")
+            doc.save(pdf_path)
+            doc.close()
+            pdfs.append(pdf_path)
+
+        # Upload múltiplo
+        files = []
+        for pdf_path in pdfs:
+            with open(pdf_path, "rb") as f:
+                content = f.read()
+            files.append(("files", (os.path.basename(pdf_path), content, "application/pdf")))
+
+        response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "zip_file" in data
+        assert data["zip_file"].endswith(".zip")
+
+    def test_upload_multiple_returns_download_url(self, client, temp_pdf):
+        """Deve retornar URL de download válida"""
+        with open(temp_pdf, "rb") as f:
+            files = [("files", ("test.pdf", f, "application/pdf"))]
+            response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "download_url" in data
+        assert "/api/download-zip/" in data["download_url"]
+
+    def test_upload_multiple_non_pdf_file(self, client, temp_output_dir):
+        """Deve rejeitar arquivo não-PDF"""
+        # Criar um arquivo TXT
+        txt_path = os.path.join(temp_output_dir, "test.txt")
+        with open(txt_path, "w") as f:
+            f.write("Not a PDF")
+
+        with open(txt_path, "rb") as f:
+            files = [("files", ("test.txt", f, "text/plain"))]
+            response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "PDF válido" in data["detail"]
+
+    def test_upload_multiple_three_pdfs(self, client, temp_output_dir):
+        """Deve processar três PDFs simultaneamente"""
+        import fitz
+
+        pdfs = []
+        for i in range(3):
+            pdf_path = os.path.join(temp_output_dir, f"doc_{i}.pdf")
+            doc = fitz.open()
+            for page_num in range(2):
+                page = doc.new_page()
+                page.insert_text((50, 50), f"Doc {i}, Page {page_num}")
+            doc.save(pdf_path)
+            doc.close()
+            pdfs.append(pdf_path)
+
+        # Upload múltiplo
+        files = []
+        for pdf_path in pdfs:
+            with open(pdf_path, "rb") as f:
+                content = f.read()
+            files.append(("files", (os.path.basename(pdf_path), content, "application/pdf")))
+
+        response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "consolidado_completo.zip" in data["zip_file"] or data["zip_file"].endswith(".zip")
+
+    def test_upload_multiple_download_generated_zip(self, client, temp_pdf):
+        """Deve ser possível fazer download do ZIP gerado"""
+        with open(temp_pdf, "rb") as f:
+            files = [("files", ("test.pdf", f, "application/pdf"))]
+            response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        zip_filename = data["zip_file"]
+
+        # Tentar fazer download do ZIP
+        download_response = client.get(f"/api/download-zip/{zip_filename}")
+        assert download_response.status_code == 200
+        assert download_response.headers["content-type"] == "application/zip"
+        assert len(download_response.content) > 0
+
+    def test_upload_multiple_zip_contains_markdown(self, client, temp_pdf):
+        """O ZIP deve conter arquivo(s) Markdown"""
+        import zipfile
+        import io
+
+        with open(temp_pdf, "rb") as f:
+            files = [("files", ("test.pdf", f, "application/pdf"))]
+            response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        zip_filename = data["zip_file"]
+
+        # Download do ZIP
+        download_response = client.get(f"/api/download-zip/{zip_filename}")
+        assert download_response.status_code == 200
+
+        # Verificar conteúdo
+        zip_bytes = io.BytesIO(download_response.content)
+        with zipfile.ZipFile(zip_bytes, 'r') as zf:
+            files_in_zip = zf.namelist()
+            has_md = any(f.endswith('.md') for f in files_in_zip)
+            assert has_md, f"ZIP deve conter .md, mas tem: {files_in_zip}"
+
+    def test_upload_multiple_different_names(self, client, temp_output_dir):
+        """Deve processar PDFs com nomes diferentes"""
+        import fitz
+
+        pdf_names = ["relatorio.pdf", "documento.pdf", "anexo.pdf"]
+        files = []
+
+        for name in pdf_names:
+            pdf_path = os.path.join(temp_output_dir, name)
+            doc = fitz.open()
+            page = doc.new_page()
+            page.insert_text((50, 50), f"Arquivo: {name}")
+            doc.save(pdf_path)
+            doc.close()
+
+            with open(pdf_path, "rb") as f:
+                content = f.read()
+            files.append(("files", (name, content, "application/pdf")))
+
+        response = client.post("/api/upload-multiple/", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
