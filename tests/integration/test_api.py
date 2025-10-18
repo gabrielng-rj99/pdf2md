@@ -4,6 +4,7 @@ import tempfile
 import json
 import shutil
 from pathlib import Path
+from typing import Generator
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -29,8 +30,8 @@ def temp_pdf(temp_output_dir):
     import fitz
 
     pdf_path = os.path.join(temp_output_dir, "test_source.pdf")
-    doc = fitz.open()
-    page = doc.new_page()
+    doc: any = fitz.open()  # type: ignore
+    page = doc.new_page()  # type: ignore
     page.insert_text((50, 50), "Teste de PDF para API")
     page.insert_text((50, 100), "Figura 1: Imagem importante")
     doc.save(pdf_path)
@@ -236,7 +237,7 @@ class TestUploadValidation:
         import fitz
 
         pdf_uppercase = os.path.join(temp_output_dir, "TEST.PDF")
-        doc = fitz.open()
+        doc: any = fitz.open()  # type: ignore
         page = doc.new_page()
         page.insert_text((50, 50), "Teste")
         doc.save(pdf_uppercase)
@@ -253,7 +254,7 @@ class TestUploadValidation:
         import fitz
 
         pdf_mixed = os.path.join(temp_output_dir, "test.Pdf")
-        doc = fitz.open()
+        doc: any = fitz.open()  # type: ignore
         page = doc.new_page()
         page.insert_text((50, 50), "Teste")
         doc.save(pdf_mixed)
@@ -308,7 +309,7 @@ class TestEdgeCaseSamePdfName:
         for i in range(2):
             # Criar PDF temporário na memória
             pdf_path = os.path.join(temp_output_dir, f"temp_{i}.pdf")
-            doc = fitz.open()
+            doc: any = fitz.open()  # type: ignore
             page = doc.new_page()
             page.insert_text((50, 50), f"Documento {i}")
             page.insert_text((50, 100), f"Página com índice {i}")
@@ -339,8 +340,8 @@ class TestEdgeCaseSamePdfName:
 
         # Criar múltiplos PDFs com conteúdo diferente mas mesmo nome
         for i in range(3):
-            pdf_path = os.path.join(temp_output_dir, f"temp_{i}.pdf")
-            doc = fitz.open()
+            pdf_path = os.path.join(temp_output_dir, f"aula_{i}.pdf")
+            doc: any = fitz.open()  # type: ignore
             # Criar PDFs com diferentes números de páginas
             for p in range(i + 1):
                 page = doc.new_page()
@@ -395,8 +396,8 @@ class TestEndToEnd:
         for i in range(3):
             # Criar um PDF único para cada iteração
             pdf_path = os.path.join(temp_output_dir, f"test_{i}.pdf")
-            doc = fitz.open()
-            page = doc.new_page()
+            doc: any = fitz.open()  # type: ignore
+            page = doc.new_page()  # type: ignore
             page.insert_text((50, 50), f"Teste {i}")
             doc.save(pdf_path)
             doc.close()
@@ -488,8 +489,8 @@ class TestUploadMultiple:
         pdfs = []
         for i in range(2):
             pdf_path = os.path.join(temp_output_dir, f"test_multi_{i}.pdf")
-            doc = fitz.open()
-            page = doc.new_page()
+            doc: any = fitz.open()  # type: ignore
+            page = doc.new_page()  # type: ignore
             page.insert_text((50, 50), f"Documento {i}")
             page.insert_text((50, 100), f"Figura 1: Teste {i}")
             doc.save(pdf_path)
@@ -544,9 +545,9 @@ class TestUploadMultiple:
         pdfs = []
         for i in range(3):
             pdf_path = os.path.join(temp_output_dir, f"doc_{i}.pdf")
-            doc = fitz.open()
+            doc: any = fitz.open()  # type: ignore
             for page_num in range(2):
-                page = doc.new_page()
+                page = doc.new_page()  # type: ignore
                 page.insert_text((50, 50), f"Doc {i}, Page {page_num}")
             doc.save(pdf_path)
             doc.close()
@@ -615,8 +616,8 @@ class TestUploadMultiple:
 
         for name in pdf_names:
             pdf_path = os.path.join(temp_output_dir, name)
-            doc = fitz.open()
-            page = doc.new_page()
+            doc: any = fitz.open()  # type: ignore
+            page = doc.new_page()  # type: ignore
             page.insert_text((50, 50), f"Arquivo: {name}")
             doc.save(pdf_path)
             doc.close()
