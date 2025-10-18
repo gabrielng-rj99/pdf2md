@@ -809,3 +809,25 @@ Tem dúvidas?
 **Desenvolvido com ❤️ usando Python, FastAPI, Docker e testes automatizados**
 
 **Mantenha em self-host com acesso controlado. Não exponha na internet pública.** 🔒
+---
+
+## 📋 Git Commits
+
+| # | Type | Commit | Description |
+|---|------|--------|-------------|
+| 1 | feat | d1e1627 | Core application structure (FastAPI, services, utils) |
+| 2 | feat | 49c286b | Frontend creation (HTML, CSS, JavaScript) |
+| 3 | test | d0ab3fa | Comprehensive test suite (254 tests, 85% coverage) |
+| 4 | docs | d3ac670 | Documentation and coverage reports |
+| 5 | chore | 27436e7 | Project configuration files |
+| 6 | chore | 6237453 | Build scripts and deployment configuration |
+| 7 | chore | 37db3d7 | SSL certificates and gitignore rules |
+| 8 | test | e1a50b9 | Sample PDF and coverage data |
+| 9 | docs | 4c14c3f | Git commits verification report |
+| 10 | docs | 6ddeac9 | Final project status report |
+| 11 | docs | d1e0cc0 | Comprehensive commits readme |
+| 12 | docs | 7e10aa1 | Git commits amendment log |
+| 13 | refactor | a098527 | Consolidate documentation and certificate handling |
+
+**Total: 14 commits (semantic versioning, English messages)**
+
