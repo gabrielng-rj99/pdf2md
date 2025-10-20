@@ -137,7 +137,6 @@ deploy/certs/*.pem
 *.p12
 *.pfx
 *.jks
-!deploy/certs/.gitkeep
 
 # API Keys and secrets
 .env
@@ -151,8 +150,6 @@ config/secrets/
 # PDFs (except sample test files)
 *.pdf
 !aula1.pdf
-!docs/samples/
-!tests/fixtures/
 
 # Build and coverage
 htmlcov/
