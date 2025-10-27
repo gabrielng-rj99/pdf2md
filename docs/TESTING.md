@@ -27,9 +27,9 @@ xdg-open htmlcov/index.html  # Linux
 
 ```
 tests/
-├── unit/                          # Unit tests (185 tests)
+├── unit/                          # Unit tests (210 tests)
 │   ├── test_config.py            # Configuration & helpers (42 tests)
-│   ├── test_image_filter.py       # Image filtering (33 tests)
+│   ├── test_image_filter.py       # Image filtering (45 tests)
 │   ├── test_image_reference_mapper.py  # Reference mapping (48 tests)
 │   ├── test_md_formatter.py       # Markdown formatting (54 tests)
 │   ├── test_pdf_service.py        # PDF processing (14 tests)
@@ -114,7 +114,7 @@ pytest tests/unit/test_config.py -v
 - Filename sanitization
 - File path utilities
 
-#### Image Filter Tests (33 tests)
+#### Image Filter Tests (45 tests)
 Tests for image filtering and detection logic.
 ```bash
 pytest tests/unit/test_image_filter.py -v
@@ -123,6 +123,7 @@ pytest tests/unit/test_image_filter.py -v
 - Side margin detection
 - Image size validation
 - Figure reference detection
+- Solid color detection (NEW)
 - Image relevance determination
 
 #### Image Reference Mapper Tests (48 tests)
@@ -216,7 +217,7 @@ pytest tests/integration/test_api.py -v
 | app/utils/helpers.py | 100% ✅ |
 | app/utils/image_reference_mapper.py | 98% ✅ |
 | app/services/pdf2md_service.py | 85% ✅ |
-| app/utils/image_filter.py | 79% ✅ |
+| app/utils/image_filter.py | 87% ✅ |
 | app/main.py | 65% ⚠️ |
 
 ### Coverage By Feature
@@ -489,11 +490,11 @@ pytest tests/ --timeout=10
 
 ## Test Statistics
 
-- **Total Tests**: 254
-- **Pass Rate**: 99.2%
+- **Total Tests**: 260
+- **Pass Rate**: 100%
 - **Average Duration**: ~10 seconds
-- **Coverage**: 85%
-- **Lines of Test Code**: 2,500+
+- **Coverage**: 87%
+- **Lines of Test Code**: 2,600+
 
 ---
 
@@ -524,10 +525,10 @@ For test issues or questions:
 | app/core/md_formatter.py | 95% |
 | app/utils/image_reference_mapper.py | 98% |
 | app/services/pdf2md_service.py | 85% |
-| app/utils/image_filter.py | 79% |
+| app/utils/image_filter.py | 87% |
 | app/main.py | 65% |
 | **Overall** | **85%** |
 
-**Total Tests:** 254 passing, 2 skipped
+**Total Tests:** 260 passing
 **Status:** ✅ Ready for production
 

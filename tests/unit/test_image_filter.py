@@ -1,5 +1,7 @@
 import pytest
 from app.utils.image_filter import ImageFilter
+from PIL import Image
+import io
 
 
 class TestImageFilterInit:
@@ -220,6 +222,120 @@ class TestRelevanceDecision:
         filter = ImageFilter()
         bbox = (100, 200, 300, 350)  # Área = ~15000px² (200x150)
         assert filter.is_relevant_image(bbox) is True
+
+    def test_solid_color_image_not_relevant(self):
+        """Imagem de cor sólida não deve ser relevante"""
+        filter = ImageFilter()
+        bbox = (100, 200, 500, 400)  # Grande no centro, mas sólida
+
+        # Criar uma imagem sólida amarela
+        img = Image.new('RGB', (100, 100), (255, 255, 0))
+        bytes_io = io.BytesIO()
+        img.save(bytes_io, format='PNG')
+        image_data = bytes_io.getvalue()
+
+        assert filter.is_relevant_image(bbox, image_data=image_data) is False
+
+    def test_solid_color_filtered_but_referenced(self):
+        """Imagem sólida com referência explícita ainda é filtrada"""
+        filter = ImageFilter()
+        bbox = (100, 200, 500, 400)
+
+        # Criar uma imagem sólida preta
+        img = Image.new('RGB', (100, 100), (0, 0, 0))
+        bytes_io = io.BytesIO()
+        img.save(bytes_io, format='PNG')
+        image_data = bytes_io.getvalue()
+
+        # Mesmo com referência a figura, cores sólidas devem ser filtradas
+        assert filter.is_relevant_image(
+            bbox,
+            page_text="Figura 1 mostra...",
+            has_figure_reference=True,
+            image_data=image_data
+        ) is False
+
+
+class TestSolidColorDetection:
+    """Testes para detecção de imagens de cor única (sólida)"""
+
+    @staticmethod
+    def create_solid_image(color, size=(100, 100)):
+        """Cria uma imagem sólida em memória como bytes"""
+        img = Image.new('RGB', size, color)
+        bytes_io = io.BytesIO()
+        img.save(bytes_io, format='PNG')
+        return bytes_io.getvalue()
+
+    @staticmethod
+    def create_gradient_image(size=(100, 100)):
+        """Cria uma imagem com padrão/gradiente em memória como bytes"""
+        img = Image.new('RGB', size)
+        pixels = img.load()
+        for i in range(size[0]):
+            for j in range(size[1]):
+                pixels[i, j] = (i % 256, j % 256, (i + j) % 256)
+        bytes_io = io.BytesIO()
+        img.save(bytes_io, format='PNG')
+        return bytes_io.getvalue()
+
+    def test_solid_yellow_image(self):
+        """Deve detectar retângulo amarelo como cor sólida"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((255, 255, 0))  # Amarelo
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_solid_black_image(self):
+        """Deve detectar quadrado preto como cor sólida"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((0, 0, 0))  # Preto
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_solid_white_image(self):
+        """Deve detectar retângulo branco como cor sólida"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((255, 255, 255))  # Branco
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_solid_red_image(self):
+        """Deve detectar cor vermelha sólida"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((255, 0, 0))  # Vermelho
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_solid_blue_image(self):
+        """Deve detectar cor azul sólida"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((0, 0, 255))  # Azul
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_gradient_image_not_solid(self):
+        """Não deve detectar imagem com gradiente como sólida"""
+        filter = ImageFilter()
+        image_data = self.create_gradient_image()
+        assert filter.is_solid_color_image(image_data) is False
+
+    def test_solid_large_image(self):
+        """Deve detectar cor sólida em imagens grandes"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((0, 128, 255), size=(500, 500))
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_solid_small_image(self):
+        """Deve detectar cor sólida em imagens pequenas"""
+        filter = ImageFilter()
+        image_data = self.create_solid_image((100, 100, 100), size=(50, 50))
+        assert filter.is_solid_color_image(image_data) is True
+
+    def test_invalid_image_data(self):
+        """Deve retornar False para dados inválidos (segurança)"""
+        filter = ImageFilter()
+        assert filter.is_solid_color_image(b'invalid image data') is False
+
+    def test_empty_image_data(self):
+        """Deve retornar False para dados vazios"""
+        filter = ImageFilter()
+        assert filter.is_solid_color_image(b'') is False
 
 
 class TestBboxOverlap:

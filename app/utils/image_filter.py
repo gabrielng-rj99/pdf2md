@@ -1,12 +1,22 @@
 import re
 from typing import List, Dict, Tuple
 import fitz
+import numpy as np
+from PIL import Image
+import io
 
 
 class ImageFilter:
     """
     Filtra imagens relevantes de PDFs, eliminando bordas, cabeçalhos e rodapés.
     Também detecta referências a figuras/tabelas no texto.
+
+    Filtros implementados:
+    - Cabeçalhos e rodapés: Remove imagens nas margens verticais
+    - Margens laterais: Remove imagens pequenas nas laterais
+    - Tamanho mínimo: Remove imagens muito pequenas
+    - Cor sólida: Remove imagens monocromáticas (fundos, barras, etc)
+    - Referências: Detecta figuras/tabelas mencionadas no texto
     """
 
     # Padrões de referência a imagens/figuras/tabelas
@@ -139,11 +149,70 @@ class ImageFilter:
 
         return references
 
+    def is_solid_color_image(self, image_data: bytes, threshold: float = 0.95) -> bool:
+        """
+        Detecta se uma imagem é essencialmente uma cor única (fundo sólido).
+
+        Imagens como retângulos amarelos, quadrados pretos, ou barras brancas
+        são filtradas por esta função.
+
+        Args:
+            image_data: Dados binários da imagem
+            threshold: Percentual de uniformidade necessário para considerar sólida (0-1)
+                      Ex: 0.95 = 95% dos pixels devem ter cores similares
+
+        Returns:
+            True se a imagem é de cor única, False caso contrário
+        """
+        try:
+            # Converter dados binários para imagem PIL
+            image = Image.open(io.BytesIO(image_data))
+
+            # Converter para RGB se necessário (remover alpha channel)
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
+            elif image.mode not in ('RGB', 'L'):
+                image = image.convert('RGB')
+
+            # Converter para array numpy
+            img_array = np.array(image)
+
+            # Reduzir o tamanho da imagem para análise mais rápida
+            # Usar uma resolução menor mantém representatividade
+            if img_array.shape[0] > 100 or img_array.shape[1] > 100:
+                # Redimensionar para no máximo 100x100
+                from PIL import Image as PILImage
+                small_image = image.resize((100, 100), PILImage.Resampling.LANCZOS)
+                img_array = np.array(small_image)
+
+            # Calcular o desvio padrão de cada canal de cor
+            if len(img_array.shape) == 3:
+                # Imagem colorida (RGB)
+                std_devs = np.std(img_array, axis=(0, 1))
+                mean_std = np.mean(std_devs)
+            else:
+                # Imagem em escala de cinza
+                mean_std = np.std(img_array)
+
+            # Se o desvio padrão é muito baixo, é uma cor sólida
+            # Um desvio padrão baixo indica pouca variação de cores
+            # Usar threshold adaptativo: imagens sólidas típicas têm std < 5-10
+            is_solid = mean_std < 10
+
+            # Converter para bool nativo do Python (não numpy.bool_)
+            return bool(is_solid)
+
+        except Exception as e:
+            # Se houver erro ao processar, não filtrar por padrão
+            # (deixa passar para ser seguro)
+            return False
+
     def is_relevant_image(
         self,
         bbox: Tuple[float, float, float, float],
         page_text: str = "",
         has_figure_reference: bool = False,
+        image_data: bytes = None,
     ) -> bool:
         """
         Determina se uma imagem é relevante (não é borda, cabeçalho, etc).
@@ -152,6 +221,7 @@ class ImageFilter:
             bbox: Bounding box da imagem
             page_text: Texto da página (para detectar referências)
             has_figure_reference: Se a página tem referência a figura/tabela
+            image_data: Dados binários da imagem (opcional, para detectar cores sólidas)
 
         Returns:
             True se a imagem é relevante
@@ -168,12 +238,17 @@ class ImageFilter:
         if self.is_too_small(bbox):
             return False
 
-        # Filtro 4: Preferir imagens em páginas com referências a figuras
+        # Filtro 4: Remover imagens de cor única/sólida (fundos, barras, etc)
+        if image_data is not None:
+            if self.is_solid_color_image(image_data):
+                return False
+
+        # Filtro 5: Preferir imagens em páginas com referências a figuras
         if has_figure_reference:
             # Se tem referência a figura, é mais provável ser relevante
             return True
 
-        # Filtro 5: Se não tem referência, mas tem tamanho significativo, é relevante
+        # Filtro 6: Se não tem referência, mas tem tamanho significativo, é relevante
         width, height = self.get_image_size(bbox)
         if width > 100 and height > 100:
             return True

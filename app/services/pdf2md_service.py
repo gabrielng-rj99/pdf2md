@@ -7,6 +7,7 @@ from app.utils.image_filter import ImageFilter
 from app.utils.image_reference_mapper import ImageReferenceMapper
 import logging
 import hashlib
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def extract_images_from_page(
     pdf_name: str,
 ) -> List[str]:
     """
-    Extrai TODAS as imagens de uma página do PDF sem filtros.
+    Extrai imagens de uma página do PDF aplicando filtros inteligentes.
 
     Args:
         doc: Documento PyMuPDF
@@ -47,13 +48,17 @@ def extract_images_from_page(
         pdf_name: Nome do arquivo PDF (para prefixo)
 
     Returns:
-        Lista de caminhos relativos das imagens extraídas
+        Lista de caminhos relativos das imagens extraídas (filtradas)
     """
     img_dir = os.path.join(output_dir, "images")
     os.makedirs(img_dir, exist_ok=True)
 
     image_paths = []
     image_count = 0
+    filtered_count = 0
+
+    # Inicializar filtro de imagens
+    image_filter = ImageFilter()
 
     # Extrair todas as imagens da página
     try:
@@ -71,12 +76,20 @@ def extract_images_from_page(
                 if pix.n - pix.alpha > 3:
                     pix = fitz.Pixmap(fitz.csRGB, pix)
 
+                # Obter dados da imagem para filtros
+                img_data = pix.tobytes()
+
+                # Filtro: Remover cores sólidas (fundos, decorações)
+                if image_filter.is_solid_color_image(img_data):
+                    filtered_count += 1
+                    logger.debug(f"Page {page_num}: Skipped solid color image {img_index}")
+                    continue
+
                 image_count += 1
 
                 # Detectar formato
                 ext = "png"
                 try:
-                    img_data = pix.tobytes()
                     if img_data.startswith(b"\x89PNG"):
                         ext = "png"
                     elif img_data.startswith(b"\xff\xd8\xff"):
@@ -103,6 +116,9 @@ def extract_images_from_page(
 
     except Exception as e:
         logger.warning(f"Page {page_num}: Error in get_images(): {e}")
+
+    if filtered_count > 0:
+        logger.debug(f"Page {page_num}: Filtered {filtered_count} solid color images")
 
     return image_paths
 

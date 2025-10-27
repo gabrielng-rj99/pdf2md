@@ -122,7 +122,12 @@ API /api/upload/ (validação)
          ↓
 PDF Service (PyMuPDF extraction)
          ↓
-Image Filter (análise + filtragem)
+Image Filter (análise + filtragem inteligente)
+    ├─ Remove cabeçalhos/rodapés
+    ├─ Remove margens laterais
+    ├─ Remove imagens muito pequenas
+    ├─ Remove cores sólidas (fundos, barras)
+    └─ Detecta referências (Figura X, Tabela Y)
          ↓
 Saída: Markdown + Imagens (ZIP)
 ```
@@ -135,7 +140,23 @@ Saída: Markdown + Imagens (ZIP)
 
 ---
 
+## 🎨 Filtros de Imagem
+
+O sistema utiliza um pipeline inteligente de filtros que remove elementos sem conteúdo:
+
+1. **Cabeçalho/Rodapé** - Imagens nas margens verticais (10% topo/rodapé)
+2. **Margens Laterais** - Imagens pequenas nas laterais (< 50px de largura)
+3. **Tamanho Mínimo** - Imagens muito pequenas (< 3000px²)
+4. **Cor Sólida** - Cores uniformes sem variação (desvio padrão < 10)
+5. **Referências** - Detecta figuras/tabelas mencionadas no texto
+6. **Tamanho Significativo** - Mantém apenas imagens relevantes (> 100x100px)
+
+O filtro de cor sólida detecta e remove automaticamente retângulos, quadrados e barras de cores únicas que não possuem conteúdo (fundos sólidos, decorações, etc).
+
+---
+
 ## 🧪 Testes
+</parameter>
 
 ✅ **210+ testes passando** | **~85% cobertura** | ~9 segundos
 
