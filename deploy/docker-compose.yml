@@ -26,7 +26,7 @@ services:
         expose:
             - "${APP_PORT:-8000}"
         volumes:
-            - ${HOST_OUTPUT_DIR:-../output}:/app/output:rw
+            - app_output:/app/output:rw
             - ${HOST_CONFIG_INI:-../config.ini}:/app/config.ini:ro
         networks:
             app_internal:
@@ -80,3 +80,11 @@ networks:
                   gateway: "${EXTERNAL_NETWORK_GATEWAY:-172.18.10.1}"
         driver_opts:
             com.docker.network.driver.mtu: "${EXTERNAL_NETWORK_MTU:-1500}"
+
+volumes:
+    app_output:
+        driver: local
+        driver_opts:
+            type: none
+            o: bind
+            device: ${HOST_OUTPUT_DIR:-../output}
