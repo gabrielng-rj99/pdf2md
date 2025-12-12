@@ -5,9 +5,13 @@ from typing import List, Tuple, Dict
 import fitz
 from app.utils.image_filter import ImageFilter
 from app.utils.image_reference_mapper import ImageReferenceMapper
+from app.utils.formula_detector import FormulaDetector, FormulaDetectorConfig, is_math_expression
+from app.utils.text_cleaner import PDFTextCleaner, TextType
+from app.utils.list_detector import ListDetector, get_list_detector
 import logging
 import hashlib
 import io
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +141,7 @@ def extract_text_blocks_from_page(page: fitz.Page, page_num: int) -> List[Dict]:
     blocks = []
 
     try:
-        text_dict = page.get_text("dict")
+        text_dict = page.get_text("dict")  # type: ignore
 
         for block in text_dict.get("blocks", []):
             if block.get("type") == 0:  # Bloco de texto
@@ -166,6 +170,457 @@ def extract_text_blocks_from_page(page: fitz.Page, page_num: int) -> List[Dict]:
     return blocks
 
 
+def _is_header_or_footer(text: str, page_num: int, total_pages: int) -> bool:
+    """
+    Detecta se um texto é header ou footer repetido.
+    Headers/footers são elementos de paginação que não fazem sentido em Markdown.
+
+    Args:
+        text: Texto a verificar
+        page_num: Número da página atual
+        total_pages: Total de páginas do documento
+
+    Returns:
+        True se for header/footer (deve ser removido)
+    """
+    text_clean = text.strip()
+
+    if not text_clean or len(text_clean) < 2:
+        return False
+
+    # 1. Número de página puro (isolado)
+    if re.match(r'^\d{1,4}$', text_clean):
+        return True
+
+    # 2. "Página X", "Página X de Y", "Page X", "Pág. X"
+    if re.match(r'^(página|page|pág\.?)\s*\d+', text_clean, re.IGNORECASE):
+        return True
+
+    # 3. Código técnico de documento no início (ex: "HSN002 – Título...")
+    # Padrões como: ABC123, AB-123, AB.123
+    if re.match(r'^[A-Z]{2,}\d{2,}', text_clean):
+        return True
+
+    # 4. Texto com múltiplos espaços grandes (layout de header/footer)
+    # Característico de: "Título    Autor    Instituição    Página"
+    if text_clean.count('  ') >= 2 and len(text_clean) > 50:
+        return True
+
+    # 5. Linha que termina com número de página após espaços
+    if re.search(r'\s{2,}\d{1,3}\s*$', text_clean):
+        return True
+
+    # 6. Padrões comuns de rodapé/cabeçalho institucional
+    institutional_patterns = [
+        r'universidade\s+(federal|estadual|de)',
+        r'faculdade\s+de',
+        r'instituto\s+(federal|de)',
+        r'prof[aª]?\.\s',
+        r'©\s*\d{4}',
+        r'all\s+rights\s+reserved',
+        r'todos\s+os\s+direitos',
+    ]
+    for pattern in institutional_patterns:
+        if re.search(pattern, text_clean, re.IGNORECASE):
+            # Só é header/footer se for linha curta ou tiver formato de cabeçalho
+            if len(text_clean) < 150 or text_clean.count('  ') >= 1:
+                return True
+
+    # 7. Texto muito longo em uma única linha (provavelmente header espalhado)
+    if len(text_clean) > 120 and '\n' not in text_clean:
+        # Verificar se tem padrões de header
+        if re.search(r'(–|—|-)\s*\d+\s*$', text_clean):
+            return True
+
+    return False
+
+
+def _filter_repeated_headers_footers(blocks: List[Dict]) -> List[Dict]:
+    """
+    Filtra blocos de texto que são headers ou footers repetidos.
+    Remove elementos de paginação que não fazem sentido em Markdown.
+
+    Args:
+        blocks: Lista de blocos de texto
+
+    Returns:
+        Lista de blocos sem headers/footers repetidos
+    """
+    if not blocks:
+        return []
+
+    total_pages = max(1, len(set(b["page"] for b in blocks)))
+
+    # Identificar padrões repetidos (aparecem em múltiplas páginas)
+    text_by_page: Dict[str, set] = {}
+    for block in blocks:
+        # Normalizar texto para comparação (remover números no final, que podem ser página)
+        text_norm = re.sub(r'\s+\d{1,3}\s*$', '', block["text"].strip().lower())
+        text_norm = re.sub(r'\s+', ' ', text_norm)  # Normalizar espaços
+        if text_norm not in text_by_page:
+            text_by_page[text_norm] = set()
+        text_by_page[text_norm].add(block.get("page", 0))
+
+    # Textos que aparecem em muitas páginas são provavelmente headers/footers
+    repeated_threshold = max(3, total_pages * 0.3)
+    repeated_texts = {t for t, pages in text_by_page.items() if len(pages) >= repeated_threshold}
+
+    # Filtrar blocos
+    filtered = []
+    for block in blocks:
+        text = block["text"].strip()
+        page_num = block.get("page", 0)
+
+        # Verificar se é header/footer por padrão
+        if _is_header_or_footer(text, page_num, total_pages):
+            continue
+
+        # Verificar se é texto repetido em muitas páginas
+        text_norm = re.sub(r'\s+\d{1,3}\s*$', '', text.lower())
+        text_norm = re.sub(r'\s+', ' ', text_norm)
+        if text_norm in repeated_texts:
+            continue
+
+        filtered.append(block)
+
+    return filtered
+
+
+# Instâncias globais
+_text_cleaner = PDFTextCleaner()
+_list_detector = get_list_detector()
+
+
+def _is_garbage_text(text: str) -> bool:
+    """
+    Detecta se o texto é "lixo" que deve ser completamente removido.
+
+    Inclui:
+    - Sequências de símbolos sem sentido
+    - Texto muito fragmentado
+    - Linhas com apenas números e símbolos
+
+    Args:
+        text: Texto a verificar
+
+    Returns:
+        True se deve ser removido
+    """
+    if not text or len(text) < 3:
+        return True
+
+    text_clean = text.strip()
+
+    # Apenas números, pontuação e espaços
+    if re.match(r'^[\d\s\.\,\-–—:;/\\()]+$', text_clean):
+        return True
+
+    # Apenas símbolos matemáticos/gregos
+    if re.match(r'^[\s$αβγδεζηθικλμνξπρστυφχψωρΓΔ∞∑∏∫∂∇√±×÷≤≥≠≈∈∉⊂⊃∪∩+\-*/^_=<>]+$', text_clean):
+        return True
+
+    # Muito poucas palavras legíveis em relação ao tamanho
+    words = re.findall(r'\b[A-Za-zÀ-ú]{3,}\b', text_clean)
+    if len(text_clean) > 20 and len(words) < 2:
+        return True
+
+    # Padrão de tabela de unidades fragmentada
+    if re.search(r'(Sistema|MKS|CGS|S\.I\.)\s*[:\.]?\s*\w{1,3}\s+\w{1,3}', text_clean):
+        return True
+
+    return False
+
+
+def _clean_pdf_artifacts(text: str) -> str:
+    """
+    Remove artefatos de PDF que não fazem sentido em Markdown.
+
+    Inclui:
+    - Números de página incorporados ao texto
+    - Marcadores de página como "$14 Si$"
+    - Headers/footers parciais que passaram pelo filtro
+    - Caracteres de controle e espaços excessivos
+
+    Args:
+        text: Texto a limpar
+
+    Returns:
+        Texto limpo ou string vazia se o texto era apenas artefato
+    """
+    if not text:
+        return ""
+
+    # Usar o limpador de texto
+    text = _text_cleaner.clean_text(text)
+
+    if not text:
+        return ""
+
+    original_text = text
+
+    # Remover headers técnicos parciais que possam ter passado
+    # Ex: "HSN002 – Mecânica dos Fluidos"
+    text = re.sub(r'^[A-Z]{2,}\d{2,}\s*[-–—]\s*[^.]+\s*$', '', text)
+
+    # Limpar referências institucionais isoladas
+    institutional = [
+        r'^.*Universidade\s+Federal.*$',
+        r'^.*Faculdade\s+de\s+Engenharia.*$',
+        r'^Prof[aª]?\.\s+\w+.*$',
+    ]
+    for pattern in institutional:
+        if re.match(pattern, text, re.IGNORECASE):
+            # Só remover se for linha curta (provavelmente header/footer)
+            if len(text) < 100:
+                text = ''
+                break
+
+    # Remover linhas que ficaram apenas com pontuação ou números
+    text = text.strip()
+    if re.match(r'^[\d\s\.\,\-–—]+$', text):
+        return ""
+
+    # Se o texto ficou muito curto após limpeza e era maior antes,
+    # provavelmente era artefato
+    if len(text) < 3 and len(original_text) > 10:
+        return ""
+
+    return text.strip()
+
+
+def _is_fragmented_formula(text: str) -> bool:
+    """
+    Detecta se o texto parece ser uma fórmula fragmentada/ilegível.
+
+    Usa heurísticas simples baseadas em padrões.
+
+    Args:
+        text: Texto a verificar
+
+    Returns:
+        True se parece ser fórmula fragmentada
+    """
+    if not text or len(text) < 5:
+        return False
+
+    # Verificar se está muito fragmentado (muitas letras isoladas)
+    isolated_letters = len(re.findall(r'\b[A-Za-z]\b', text))
+    total_words = len(text.split())
+
+    # Se mais de 50% são letras isoladas, está fragmentado
+    if total_words > 3 and isolated_letters / total_words > 0.5:
+        return True
+
+    # Padrão de sequência fragmentada (muitas palavras curtas seguidas)
+    if re.search(r'(\b\w{1,3}\b\s+){5,}', text):
+        return True
+
+    # Padrão de unidades fragmentadas
+    if re.search(r'\b\w{1,3}\s+\w{1,3}\s*:\s*\w', text):
+        return True
+
+    # Muitos símbolos $ (LaTeX fragmentado)
+    if text.count('$') >= 4:
+        return True
+
+    return False
+
+
+def _clean_fragmented_formula(text: str) -> str:
+    """
+    Tenta limpar ou simplificar uma fórmula fragmentada.
+
+    Usa heurísticas simples para extrair partes legíveis.
+
+    Args:
+        text: Texto da fórmula fragmentada
+
+    Returns:
+        Texto limpo ou string vazia se muito fragmentado
+    """
+    # Extrair número de equação se presente
+    eq_match = re.search(r'\(?\s*(\d+[.,]\d+)\s*\)?', text)
+    eq_label = eq_match.group(1) if eq_match else None
+
+    # Tentar extrair palavras legíveis (mais de 3 caracteres)
+    words = text.split()
+    readable_words = [w for w in words if len(w) > 3 and w.isalpha()]
+    readable_text = ' '.join(readable_words)
+
+    # Se conseguiu extrair texto legível significativo
+    if readable_text and len(readable_text) >= 10:
+        if eq_label:
+            return f'{readable_text} *(Eq. {eq_label})*'
+        return readable_text
+
+    # Se só tem número de equação
+    if eq_label:
+        return f'*(Equação {eq_label})*'
+
+    # Fórmula muito fragmentada - retornar texto original (não remover)
+    # O usuário pediu para não tentar reconstruir o que não funciona
+    return text
+
+
+def _detect_heading_level(text: str, font_size: float, is_bold: bool, all_font_sizes: List[float]) -> int:
+    """
+    Detecta o nível de heading baseado em padrões e tamanho de fonte.
+
+    Args:
+        text: Texto do heading
+        font_size: Tamanho da fonte
+        is_bold: Se está em negrito
+        all_font_sizes: Lista de todos os tamanhos de fonte únicos do documento
+
+    Returns:
+        Nível do heading (1-6) ou 0 se não for heading
+    """
+    text_upper = text.strip().upper()
+    text_clean = text.strip()
+
+    # NÃO é heading se for muito curto ou parecer fragmento de fórmula
+    if len(text_clean) < 3:
+        return 0
+
+    # Não tratar como heading se parecer ser fragmento de fórmula ou variável
+    # Ex: "Patm", "gH", símbolos isolados
+    if re.match(r'^[A-Za-z]{1,5}$', text_clean) and not text_clean.isupper():
+        return 0
+
+    # Não tratar como heading se for "A integral", "O volume", etc (início de frase)
+    if re.match(r'^(A|O|As|Os|Um|Uma)\s+\w+$', text_clean):
+        return 0
+
+    # NÃO é heading se parecer ser legenda de figura
+    if re.match(r'^(Figura|Figure|Fig\.?|Tabela|Table|Tab\.?)\s*\d', text_clean, re.IGNORECASE):
+        return 0
+
+    # NÃO é heading se terminar com preposição (heading incompleto)
+    # EXCETO se for ALL CAPS (título de documento)
+    if re.search(r'\s+(de|do|da|dos|das|em|no|na|nos|nas|a|o|e|ou|para|com)\s*$', text_clean, re.IGNORECASE):
+        if not text_clean.isupper():
+            return 0
+
+    # NÃO é heading se o número de seção for muito alto (provavelmente é referência de figura)
+    section_match = re.match(r'^(\d+)\.(\d+)\s*[-–—]', text_clean)
+    if section_match:
+        sub_num = int(section_match.group(2))
+        if sub_num > 12:
+            return 0
+
+    # Padrões para H1 (títulos principais)
+    # "CAPÍTULO X", "PARTE X", "CHAPTER X"
+    if re.match(r'^(CAPÍTULO|CAPITULO|PARTE|CHAPTER|UNIT)\s+\d+', text_upper):
+        return 1
+
+    # Título principal todo em maiúsculas com fonte grande
+    if text_clean.isupper() and len(text_clean) > 5 and font_size > 16:
+        return 1
+
+    # "CAPÍTULO X – Título" combina CAPÍTULO com título
+    if re.match(r'^(CAPÍTULO|CAPITULO|CHAPTER)\s+\d+\s*[-–—]\s*\S', text_upper):
+        return 1
+
+    # Padrões para H2/H3 baseado em numeração
+    # "X.X - Título" ou "X.X – Título" (seção de primeiro nível com subseção)
+    # Mas NÃO se for apenas "1 – A diferença" (conclusão numerada simples)
+    if re.match(r'^\d+\.\d+\s*[-–—]?\s*[A-ZÀ-Ú]', text_clean) and not re.match(r'^\d+\.\d+\.\d+', text_clean):
+        return 2
+
+    # "X.X.X - Título" (subsubseção)
+    if re.match(r'^\d+\.\d+\.\d+\s*[-–—]?\s*[A-ZÀ-Ú]', text_clean) and not re.match(r'^\d+\.\d+\.\d+\.\d+', text_clean):
+        return 3
+
+    # "X.X.X.X - Título" (subsubsubseção)
+    if re.match(r'^\d+\.\d+\.\d+\.\d+', text_clean):
+        return 4
+
+    # Baseado em tamanho de fonte quando não há padrão claro
+    # Mas só se tiver um tamanho de fonte significativamente maior
+    if font_size > 18 and text_clean.isupper():
+        return 1
+    elif font_size > 16 and len(text_clean) < 80:
+        return 2
+
+    return 0
+
+
+def _is_heading_candidate(text: str, font_size: float, is_bold: bool) -> bool:
+    """
+    Verifica se um texto é candidato a heading.
+
+    Args:
+        text: Texto a verificar
+        font_size: Tamanho da fonte
+        is_bold: Se está em negrito
+
+    Returns:
+        True se for candidato a heading
+    """
+    text_clean = text.strip()
+
+    # Texto muito longo não é heading
+    if len(text_clean) > 150:
+        return False
+
+    # Texto muito curto não é heading
+    if len(text_clean) < 3:
+        return False
+
+    # Não é heading se parecer ser fragmento de fórmula ou variável
+    # Ex: "Patm", "gH", símbolos matemáticos isolados
+    if re.match(r'^[A-Za-z]{1,5}$', text_clean) and not text_clean.isupper():
+        return False
+
+    # Não é heading se for início de frase comum
+    if re.match(r'^(A|O|As|Os|Um|Uma)\s+\w+$', text_clean):
+        return False
+
+    # Não é heading se for apenas número + texto curto sem estrutura de seção
+    # Ex: "1 – A diferença" (conclusão numerada, não seção)
+    if re.match(r'^[1-9]\s*[-–—]\s*[A-ZÀ-Ú]', text_clean) and '.' not in text_clean[:5]:
+        # Verificar se não é uma seção real (seções têm formato X.X)
+        return False
+
+    # NÃO é heading se parecer ser legenda de figura
+    # Ex: "2.15 – Componente vertical do esforço", "Figura 1.3: Esquema"
+    if re.match(r'^(Figura|Figure|Fig\.?|Tabela|Table|Tab\.?)\s*\d', text_clean, re.IGNORECASE):
+        return False
+
+    # NÃO é heading se o número de seção for muito alto (provavelmente é referência)
+    # Ex: "2.15 – ..." onde 15 é muito alto para uma subseção típica
+    section_match = re.match(r'^(\d+)\.(\d+)\s*[-–—]', text_clean)
+    if section_match:
+        sub_num = int(section_match.group(2))
+        if sub_num > 12:  # Subseções típicas vão até ~10
+            return False
+
+    # NÃO é heading se terminar com preposição ou artigo (heading incompleto)
+    # EXCETO se for ALL CAPS (título de documento)
+    if re.search(r'\s+(de|do|da|dos|das|em|no|na|nos|nas|a|o|e|ou|para|com)\s*$', text_clean, re.IGNORECASE):
+        if not text_clean.isupper():
+            return False
+
+    # Padrões de heading por regex - APENAS padrões estruturais
+    heading_patterns = [
+        r'^(CAPÍTULO|CAPITULO|PARTE|CHAPTER|UNIT|SEÇÃO|SECAO|SECTION)\s+\d+',  # Capítulo X
+        r'^\d+\.\d+\s*[-–—]?\s*[A-ZÀ-Ú]',  # 1.1 - Título ou 1.1 Título
+        r'^\d+\.\d+\.\d+',  # 1.1.1
+    ]
+
+    for pattern in heading_patterns:
+        if re.match(pattern, text_clean, re.IGNORECASE):
+            return True
+
+    # Fonte grande com texto em maiúsculas é heading
+    if font_size > 16 and text_clean.isupper() and len(text_clean) > 5:
+        return True
+
+    # Negrito NÃO qualifica automaticamente como heading
+    # Apenas padrões estruturais acima
+    return False
+
+
 def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
     """
     Consolida blocos de texto em parágrafos bem formatados.
@@ -179,37 +634,185 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
     if not blocks:
         return []
 
+    # Filtrar headers/footers repetidos
+    blocks = _filter_repeated_headers_footers(blocks)
+
+    if not blocks:
+        return []
+
     paragraphs = []
     current_paragraph = []
+    current_list_items = []  # Acumula itens de lista
+    in_list = False
     last_font_size = None
     last_is_bold = False
 
+    # Coletar tamanhos de fonte únicos para análise
+    all_font_sizes = sorted(set(b["font_size"] for b in blocks), reverse=True)
+
+    # Inicializar detector de fórmulas (heurístico)
+    formula_config = FormulaDetectorConfig(
+        min_confidence=0.5,
+        wrap_inline=True,
+        wrap_block=True,
+        detect_fractions=True,
+        detect_subscripts=True,
+        detect_superscripts=True,
+        detect_greek=True,
+        detect_special_functions=True,
+    )
+    formula_detector = FormulaDetector(formula_config)
+
+    # Usar detector de listas
+    list_detector = _list_detector
+
+    def _finalize_paragraph():
+        """Finaliza o parágrafo atual e processa listas inline."""
+        nonlocal current_paragraph
+        if current_paragraph:
+            paragraph_text = " ".join(current_paragraph)
+            # Verificar se o parágrafo contém lista inline
+            if list_detector.has_inline_list(paragraph_text):
+                processed = list_detector.process_paragraph(paragraph_text)
+                # process_paragraph retorna texto com \n para listas
+                for line in processed.split('\n'):
+                    if line.strip():
+                        paragraphs.append(line)
+                    elif paragraphs and paragraphs[-1] != "":
+                        paragraphs.append("")
+            else:
+                # Processar fórmulas no parágrafo usando detector heurístico
+                paragraph_text = formula_detector.process_text(paragraph_text)
+                paragraphs.append(paragraph_text)
+            current_paragraph = []
+
+    def _finalize_list():
+        """Finaliza a lista atual."""
+        nonlocal current_list_items, in_list
+        if current_list_items:
+            for item in current_list_items:
+                paragraphs.append(item)
+            paragraphs.append("")  # Linha em branco após lista
+            current_list_items = []
+        in_list = False
+
     for block in blocks:
         text = block["text"].strip()
+
+        # Limpar artefatos de PDF (números de página, headers parciais, etc.)
+        text = _clean_pdf_artifacts(text)
+
+        # Pular se ficou vazio após limpeza
+        if not text:
+            continue
+
+        # Verificar se é texto "lixo"
+        if _is_garbage_text(text):
+            continue
+
+        # Detectar e tratar fórmulas fragmentadas
+        if _is_fragmented_formula(text):
+            text = _clean_fragmented_formula(text)
+            if not text:
+                continue
+
         font_size = block["font_size"]
         is_bold = bool(block["font_flags"] & 2**4)  # Flag de negrito
 
-        # Detectar título (fonte maior ou negrito)
-        is_heading = font_size > 14 or (is_bold and len(text) < 100)
+        # NOVA LÓGICA: Detectar itens de lista (antes de verificar headings)
+        if list_detector.is_list_item(text):
+            # Finalizar parágrafo anterior se houver
+            if current_paragraph:
+                _finalize_paragraph()
 
-        # Se for título, finalizar parágrafo anterior
+            # Formatar item de lista
+            formatted_item = list_detector.format_list_item(text)
+            current_list_items.append(formatted_item)
+            in_list = True
+            last_font_size = font_size
+            last_is_bold = is_bold
+            continue
+
+        # Se estava em lista, verificar se é continuação do item anterior
+        # (texto fragmentado que faz parte do último item)
+        if in_list and current_list_items:
+            # Heurística: é continuação se:
+            # 1. Texto curto (< 50 chars)
+            # 2. Começa com letra minúscula ou é apenas uma palavra
+            # 3. Termina com ; ou , (continuação de lista)
+            # 4. Não é heading ou outro elemento estrutural
+            is_continuation = False
+            text_stripped = text.strip()
+
+            if len(text_stripped) < 60:
+                # Começa com minúscula ou é palavra isolada
+                if text_stripped[0].islower() or len(text_stripped.split()) <= 2:
+                    is_continuation = True
+                # Termina com ponto-e-vírgula (continuação de item)
+                if text_stripped.endswith(';'):
+                    is_continuation = True
+
+            if is_continuation and not _is_heading_candidate(text, font_size, is_bold):
+                # Anexar ao último item da lista
+                last_item = current_list_items[-1]
+                # Remover o "- " do início para reconstruir
+                if last_item.startswith('- '):
+                    current_list_items[-1] = f"- {last_item[2:]} {text_stripped}"
+                else:
+                    current_list_items[-1] = f"{last_item} {text_stripped}"
+                last_font_size = font_size
+                last_is_bold = is_bold
+                continue
+
+        # Se estava em lista mas este bloco não é item nem continuação, finalizar lista
+        if in_list:
+            _finalize_list()
+
+        # Detectar se é candidato a heading
+        is_heading = _is_heading_candidate(text, font_size, is_bold)
+
+        # Se for heading, finalizar parágrafo anterior
         if is_heading:
             if current_paragraph:
-                paragraphs.append(" ".join(current_paragraph))
-                current_paragraph = []
+                _finalize_paragraph()
 
-            # Adicionar título com marcação Markdown
-            if font_size > 18:
-                paragraphs.append(f"# {text}")
-            elif font_size > 16:
-                paragraphs.append(f"## {text}")
-            elif font_size > 14:
-                paragraphs.append(f"### {text}")
+            # Detectar nível do heading
+            level = _detect_heading_level(text, font_size, is_bold, all_font_sizes)
+
+            if level > 0:
+                # Adicionar heading com nível correto
+                prefix = "#" * level
+                paragraphs.append(f"{prefix} {text}")
             else:
+                # Fallback para negrito se não for heading estrutural
                 paragraphs.append(f"**{text}**")
 
             last_font_size = font_size
             last_is_bold = is_bold
+            continue
+
+        # Se for apenas negrito (sem ser heading), adicionar como negrito no parágrafo
+        if is_bold and len(text) < 100:
+            # Adicionar negrito inline ao invés de criar heading
+            if current_paragraph:
+                # Se há parágrafo anterior, combinar
+                current_paragraph.append(f"**{text}**")
+            else:
+                # Caso contrário, criar parágrafo com apenas negrito
+                current_paragraph.append(f"**{text}**")
+            last_font_size = font_size
+            last_is_bold = is_bold
+            continue
+
+        # Verificar se a linha é uma fórmula em bloco usando detector heurístico
+        if formula_detector.is_formula_line(text):
+            # Finalizar parágrafo anterior
+            if current_paragraph:
+                _finalize_paragraph()
+
+            # Processar e adicionar fórmula como bloco
+            formatted = formula_detector.format_formula_block(text)
+            paragraphs.append(formatted)
             continue
 
         # Detectar quebra de parágrafo
@@ -222,25 +825,28 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
         # Linha termina com ponto e próxima começa com maiúscula
         if (current_paragraph and
             current_paragraph[-1].endswith(".") and
-            text[0].isupper()):
+            text and text[0].isupper()):
             should_break = True
 
-        # Lista ou item enumerado
+        # Lista ou item enumerado (padrão legado)
         if re.match(r'^[\d\-•]\s', text):
             should_break = True
 
         if should_break and current_paragraph:
-            paragraphs.append(" ".join(current_paragraph))
-            current_paragraph = []
+            _finalize_paragraph()
 
         # Adicionar texto ao parágrafo atual
         current_paragraph.append(text)
         last_font_size = font_size
         last_is_bold = is_bold
 
+    # Finalizar lista pendente
+    if in_list:
+        _finalize_list()
+
     # Adicionar último parágrafo
     if current_paragraph:
-        paragraphs.append(" ".join(current_paragraph))
+        _finalize_paragraph()
 
     return paragraphs
 
@@ -264,41 +870,25 @@ def _inject_images_in_paragraphs(
         Lista de linhas com imagens inseridas
     """
     result = []
-    used_images = set()
 
-    # Padrões de referência a imagens
-    reference_patterns = [
-        r"(?:figura|fig\.?)\s+(\d+)",
-        r"(?:tabela|tab\.?)\s+(\d+)",
-        r"(?:imagem|img\.?)\s+(\d+)",
-        r"(?:gráfico|gráf\.?)\s+(\d+)",
-        r"(?:chart|figure|fig\.?)\s+(\d+)",
-        r"(?:table|tbl\.?)\s+(\d+)",
-        r"(?:image|img\.?)\s+(\d+)",
-    ]
+    # Se não há imagens, retorna parágrafos como estão
+    if not page_images:
+        return paragraphs
 
-    for para in paragraphs:
-        result.append(para)
+    # Adiciona imagens no final da página se houver
+    result.extend(paragraphs)
 
-        # Buscar referências no parágrafo
-        for pattern in reference_patterns:
-            matches = re.finditer(pattern, para, re.IGNORECASE)
-            for match in matches:
-                ref_type = match.group(0).split()[0].lower()
-                ref_num = int(match.group(1))
+    # Inserir imagens da página no final
+    for img_path in page_images:
+        img_basename = os.path.basename(img_path)
+        # Extrair número da imagem do nome do arquivo (ex: aula1_pag2_img1.png -> 1)
+        img_num_match = re.search(r'_img(\d+)', img_basename)
+        img_num = img_num_match.group(1) if img_num_match else "1"
 
-                # Tentar encontrar imagem correspondente
-                for img_path in page_images:
-                    if img_path not in used_images:
-                        # Inserir imagem logo após o parágrafo que a referencia
-                        img_basename = os.path.basename(img_path)
-                        caption = f"{ref_type.capitalize()} {ref_num}"
-                        result.append("")
-                        result.append(f"![{caption}]({img_path})")
-                        result.append(f"*{caption}*")
-                        result.append("")
-                        used_images.add(img_path)
-                        break
+        result.append("")
+        result.append(f"![Figura {img_num}]({img_path})")
+        result.append(f"*Figura {img_num}*")
+        result.append("")
 
     return result
 
@@ -392,7 +982,7 @@ def process_pdf(pdf_path: str, output_dir: str) -> Tuple[str, str]:
 
     # PRIMEIRA PASSAGEM: extrair TODAS as imagens
     print("\n🖼️  Extraindo todas as imagens...")
-    for page_num, page in enumerate(doc, start=1):
+    for page_num, page in enumerate(doc, start=1):  # type: ignore
         # Extrair TODAS as imagens (sem filtro)
         images = extract_images_from_page(doc, page, page_num, output_dir, pdf_name)
 
@@ -407,7 +997,7 @@ def process_pdf(pdf_path: str, output_dir: str) -> Tuple[str, str]:
 
     # SEGUNDA PASSAGEM: processar texto por página
     print("\n📝 Processando texto...")
-    for page_num, page in enumerate(doc, start=1):
+    for page_num, page in enumerate(doc, start=1):  # type: ignore
         # Extrair blocos de texto estruturados
         blocks = extract_text_blocks_from_page(page, page_num)
 
@@ -633,7 +1223,7 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
         print(f"\n   📄 {pdf_name}.pdf ({len(doc)} páginas)")
 
         # Extrair imagens de todas as páginas deste PDF
-        for page_num, page in enumerate(doc, start=1):
+        for page_num, page in enumerate(doc, start=1):  # type: ignore
             images = extract_images_from_page(doc, page, page_num, output_dir, pdf_name)
             if images:
                 page_images[page_num] = images
@@ -660,7 +1250,7 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
         md_lines.append(f"# {pdf_name}")
         md_lines.append("")
 
-        for page_num, page in enumerate(doc, start=1):
+        for page_num, page in enumerate(doc, start=1):  # type: ignore
             # Extrair blocos de texto estruturados
             blocks = extract_text_blocks_from_page(page, page_num)
 

@@ -212,10 +212,10 @@ class TestConsolidateTextBlocks:
         assert "Hello world" in result[0]
 
     def test_consolidate_heading_detection(self):
-        """Deve detectar headings por tamanho de fonte"""
+        """Deve detectar headings por tamanho de fonte e padrão estrutural"""
         blocks = [
             {
-                "text": "Título",
+                "text": "TÍTULO DO DOCUMENTO",
                 "font_size": 24,
                 "font_flags": 0,
                 "bbox": [0, 0, 100, 30],
@@ -231,7 +231,7 @@ class TestConsolidateTextBlocks:
         ]
         result = consolidate_text_blocks(blocks)
         assert len(result) >= 2
-        # Título deve ter # Markdown
+        # Título ALL CAPS com fonte grande deve ter # Markdown
         assert any("#" in p for p in result)
 
     def test_consolidate_bold_detection(self):
