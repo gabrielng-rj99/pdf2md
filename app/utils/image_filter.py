@@ -1,5 +1,5 @@
 import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import fitz
 import numpy as np
 from PIL import Image
@@ -212,7 +212,7 @@ class ImageFilter:
         bbox: Tuple[float, float, float, float],
         page_text: str = "",
         has_figure_reference: bool = False,
-        image_data: bytes = None,
+        image_data: Optional[bytes] = None,
     ) -> bool:
         """
         Determina se uma imagem é relevante (não é borda, cabeçalho, etc).
