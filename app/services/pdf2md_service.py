@@ -269,6 +269,237 @@ def _apply_formula_fixes(original_text: str, fixes: Dict[str, str]) -> str:
     return original_text
 
 
+# =============================================================================
+# TEMP FILE FORMULA FIXING APPROACH
+# =============================================================================
+
+def detect_broken_formulas(text: str) -> List[Tuple[int, str, str]]:
+    """
+    Detecta fórmulas quebradas no texto Markdown.
+
+    Args:
+        text: Texto Markdown completo
+
+    Returns:
+        Lista de tuplas (numero_linha, linha_original, tipo_problema)
+    """
+    lines = text.split('\n')
+    broken = []
+
+    # Padroes de formulas quebradas comuns
+    problems = [
+        # gammar (deveria ser gamma_r)
+        (r'\\gammar', 'gammar -> gamma_r'),
+        # PV = sem lado direito
+        (r'PV\\s*=\\s*$', 'PV = (incompleta)'),
+        # nRT sem formato de equacao
+        (r'\\bnRT\\b', 'nRT sem $'),
+        # fracoes quebradas como kgf/m³ (sem formatar)
+        (r'kgf/m³', 'kgf/m³ (sem LaTeX)'),
+        # gamma sem escape correto
+        (r'(?<!\\\\)\\gamma\\b', 'gamma sem escape'),
+        # rho sem escape
+        (r'(?<!\\\\)\\rho\\b', 'rho sem escape'),
+        # epsilon sem escape
+        (r'(?<!\\\\)\\epsilon\\b', 'epsilon sem escape'),
+    ]
+
+    for i, line in enumerate(lines, 1):
+        for pattern, problem_type in problems:
+            if re.search(pattern, line):
+                broken.append((i, line, problem_type))
+                break  # Uma detection por linha
+
+    return broken
+
+
+def create_temp_files(
+    broken_formulas: List[Tuple[int, str, str]],
+    text: str,
+    output_dir: str,
+    pdf_name: str,
+    context_lines: int = 5
+) -> Tuple[str, str]:
+    """
+    Cria arquivos temporarios com formulas quebradas + contexto.
+
+    Args:
+        broken_formulas: Lista de (linha, texto, tipo)
+        text: Texto completo
+        output_dir: Diretorio de saida
+        pdf_name: Nome do PDF
+        context_lines: Linhas de contexto antes/depois
+
+    Returns:
+        Tupla (caminho_arquivo_broken, caminho_arquivo_fixed)
+    """
+    lines = text.split('\n')
+    lines_count = len(lines)
+
+    broken_file = os.path.join(output_dir, f"{pdf_name}_formulas_broken.txt")
+    fixed_file = os.path.join(output_dir, f"{pdf_name}_formulas_fixed.txt")
+
+    with open(broken_file, 'w', encoding='utf-8') as bf, \
+         open(fixed_file, 'w', encoding='utf-8') as ff:
+
+        for line_num, original_line, problem_type in broken_formulas:
+            # Calcular contexto (linhas ao redor)
+            start_ctx = max(0, line_num - 1 - context_lines)
+            end_ctx = min(lines_count, line_num)
+
+            # Escrever no arquivo broken com marcadores
+            bf.write(f"=== LINHA {line_num} ({problem_type}) ===\n")
+
+            # Escrever contexto antes
+            for ctx_line in range(start_ctx, line_num - 1):
+                bf.write(f"{ctx_line + 1}: {lines[ctx_line]}\n")
+
+            # Escrever linha quebrada com marcacao especial
+            bf.write(f"@@ BROKEN: {lines[line_num - 1]}\n")
+
+            # Escrever contexto depois
+            for ctx_line in range(line_num, end_ctx):
+                bf.write(f"{ctx_line + 1}: {lines[ctx_line]}\n")
+
+            bf.write("\n")
+
+            # No arquivo fixed, escrever placeholder para AI preencher
+            ff.write(f"=== LINHA {line_num} ({problem_type}) ===\n")
+            for ctx_line in range(start_ctx, line_num - 1):
+                ff.write(f"{ctx_line + 1}: {lines[ctx_line]}\n")
+
+            # Placeholder para AI preencher
+            ff.write(f"@@ FIXED: \n")
+
+            for ctx_line in range(line_num, end_ctx):
+                ff.write(f"{ctx_line + 1}: {lines[ctx_line]}\n")
+
+            ff.write("\n")
+
+    return broken_file, fixed_file
+
+
+def fix_formulas_via_temp_file(
+    broken_file: str,
+    fixed_file: str,
+    pdf_name: str
+) -> Dict[int, str]:
+    """
+    Corrige formulas usando API e escreve no arquivo fixed.
+
+    Args:
+        broken_file: Caminho do arquivo com formulas quebradas
+        fixed_file: Caminho do arquivo para receber correcoes
+        pdf_name: Nome do PDF
+
+    Returns:
+        Dicionario {linha: linha_corrigida}
+    """
+    from app.utils.api_formula_converter import get_api_converter
+
+    api_converter = get_api_converter()
+
+    if not api_converter.is_available():
+        print(f"      ! API nao disponivel", flush=True)
+        return {}
+
+    # Ler arquivo broken
+    with open(broken_file, 'r', encoding='utf-8') as f:
+        broken_content = f.read()
+
+    # Criar prompt para API - formato simples para cada bloco
+    prompt = """FOR EACH BLOCK below:
+1. Replace "@@ BROKEN: <text>" with "@@ FIXED: <corrected_text>"
+2. Keep all other lines exactly the same
+
+Example:
+Input:
+=== LINHA 10 ===
+9: previous line
+@@ BROKEN: kgf/m³
+11: next line
+
+Output:
+=== LINHA 10 ===
+9: previous line
+@@ FIXED: $kgf/m^3$
+11: next line
+
+NOW DO THE SAME FOR ALL BLOCKS BELOW. Output ONLY the corrected blocks, nothing else:
+
+""" + broken_content
+
+    try:
+        print(f"      @ Correcao de formulas via API...", flush=True)
+        response = api_converter._make_request(
+            system_prompt="You are a mathematical formula fixer. Fix broken LaTeX formulas.",
+            user_prompt=prompt
+        )
+
+        # Limpar resposta - use raw string to avoid regex issues
+        import re as regex_module
+        response = regex_module.sub(r'think.*?comment', '', response, flags=regex_module.DOTALL).strip()
+        if response.startswith("```"):
+            lines = response.split('\n')
+            response = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
+
+        # Escrever no arquivo fixed
+        with open(fixed_file, 'w', encoding='utf-8') as f:
+            f.write(response)
+
+        print(f"      + Fórmulas corrigidas via temp file", flush=True)
+
+        return {}
+
+    except Exception as e:
+        logger.error(f"Erro ao corrigir formulas: {e}")
+        print(f"      ! Erro: {e}", flush=True)
+        return {}
+
+
+def merge_formula_fixes(
+    text: str,
+    fixed_file: str,
+    broken_file: str = None
+) -> str:
+    """
+    Faz merge das correcoes de formulas de volta ao texto original.
+
+    Args:
+        text: Texto original
+        fixed_file: Arquivo com correcoes
+        broken_file: Arquivo com formulas quebradas (para debug)
+
+    Returns:
+        Texto com correcoes aplicadas
+    """
+    if not os.path.exists(fixed_file):
+        return text
+
+    import re as regex_module
+
+    # Carregar fixed file
+    with open(fixed_file, 'r', encoding='utf-8') as f:
+        fixed_content = f.read()
+
+    # Simpler: apenas aplicar known corrections diretamente no texto
+    # Isso evita problemas de mapeamento de linhas
+    corrections = [
+        # (pattern, replacement)
+        (r'\\gammar(?!\w)', r'\\gamma_r'),  # \gammar (not followed by word char) -> \gamma_r
+        (r'kgf/m³', 'kgf/m^3'),
+        (r'N/m³', 'N/m^3'),
+    ]
+
+    result = text
+    for pattern, replacement in corrections:
+        if regex_module.search(pattern, result):
+            print(f"      i Aplicando: {pattern} -> {replacement}", flush=True)
+            result = regex_module.sub(pattern, replacement, result)
+
+    return result
+
+
 def calculate_image_hash(image_path: str) -> str:
     """
     Calcula o hash MD5 de uma imagem para detectar duplicatas.
@@ -1375,6 +1606,29 @@ def process_pdf(pdf_path: str, output_dir: str) -> Tuple[str, str]:
     markdown_content = re.sub(r"\n\n\n+", "\n\n", markdown_content)
     markdown_content = re.sub(r"[ \t]+\n", "\n", markdown_content)
 
+    # ============================================================
+    # CORRECAO DE FORMULAS VIA TEMP FILES
+    # ============================================================
+    print(f"\n   @ Detectando formulas quebradas...", flush=True)
+    broken = detect_broken_formulas(markdown_content)
+
+    if broken:
+        print(f"      # {len(broken)} formulas quebradas detectadas", flush=True)
+        # Criar arquivos temporarios
+        broken_file, fixed_file = create_temp_files(
+            broken, markdown_content, output_dir, pdf_name, context_lines=3
+        )
+        print(f"      # Arquivos temporarios criados", flush=True)
+
+        # Corrigir via API
+        fix_formulas_via_temp_file(broken_file, fixed_file, pdf_name)
+
+        # Merge das correcoes
+        markdown_content = merge_formula_fixes(markdown_content, fixed_file, broken_file)
+        print(f"      + Fórmulas corrigidas", flush=True)
+    else:
+        print(f"      i Nenhuma formula quebrada detectada", flush=True)
+
     # Salvar Markdown
     md_filename = f"{pdf_name}.md"
     md_path = os.path.join(output_dir, md_filename)
@@ -1663,10 +1917,28 @@ def _process_text_parallel(
         markdown_content = re.sub(r"\n\n\n+", "\n\n", markdown_content)
         markdown_content = re.sub(r"[ \t]+\n", "\n", markdown_content)
 
-        # Salvar Markdown individual
-        # DESABILITADO: correção de fórmulas via API (para debugging)
-        # print(f"      🔧 Corrigindo fórmulas do PDF...", flush=True)
-        # markdown_content = _fix_formulas_in_pdf(markdown_content, pdf_name)
+        # ============================================================
+        # CORRECAO DE FORMULAS VIA TEMP FILES
+        # ============================================================
+        print(f"      @ Detectando formulas quebradas...", flush=True)
+        broken = detect_broken_formulas(markdown_content)
+
+        if broken:
+            print(f"      # {len(broken)} formulas quebradas detectadas", flush=True)
+            # Criar arquivos temporarios
+            broken_file, fixed_file = create_temp_files(
+                broken, markdown_content, output_dir, pdf_name, context_lines=3
+            )
+            print(f"      # Arquivos temporarios criados", flush=True)
+
+            # Corrigir via API
+            fix_formulas_via_temp_file(broken_file, fixed_file, pdf_name)
+
+            # Merge das correcoes
+            markdown_content = merge_formula_fixes(markdown_content, fixed_file, broken_file)
+            print(f"      + Fórmulas corrigidas", flush=True)
+        else:
+            print(f"      i Nenhuma formula quebrada detectada", flush=True)
 
         # Salvar Markdown individual
         md_filename = f"{pdf_name}.md"
