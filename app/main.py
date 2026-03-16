@@ -5,6 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import shutil
 import configparser
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 from app.services.pdf2md_service import process_pdf, process_multiple_pdfs
 
 app = FastAPI(
