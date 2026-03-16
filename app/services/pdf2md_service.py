@@ -1183,6 +1183,14 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
     if current_paragraph:
         _finalize_paragraph(block_index)
 
+    # REMOVER PARÁGRAFOS DUPLICADOS CONSECUTIVOS ( workaround para bug de duplicação )
+    if paragraphs:
+        deduped = [paragraphs[0]]
+        for p in paragraphs[1:]:
+            if p != deduped[-1]:
+                deduped.append(p)
+        paragraphs = deduped
+
     return paragraphs
 
 
