@@ -286,22 +286,28 @@ def detect_broken_formulas(text: str) -> List[Tuple[int, str, str]]:
     lines = text.split('\n')
     broken = []
 
-    # Padroes de formulas quebradas comuns
+    # Padroes de formulas quebradas/incompletas/erradas
     problems = [
         # gammar (deveria ser gamma_r)
         (r'\\gammar', 'gammar -> gamma_r'),
-        # PV = sem lado direito (sem backslash)
-        (r'PV\s*=\s*$', 'PV = (incompleta)'),
-        # nRT sem formato de equacao
-        (r'\\bnRT\\b', 'nRT sem $'),
-        # fracoes quebradas como kgf/m³ (sem formatar)
-        (r'kgf/m³', 'kgf/m³ (sem LaTeX)'),
-        # gamma sem escape correto
-        (r'(?<!\\\\)\\gamma\\b', 'gamma sem escape'),
-        # rho sem escape
-        (r'(?<!\\\\)\\rho\\b', 'rho sem escape'),
-        # epsilon sem escape
-        (r'(?<!\\\\)\\epsilon\\b', 'epsilon sem escape'),
+        # kgf/m³ (sem formato LaTeX)
+        (r'kgf/m³', 'kgf/m³'),
+        # N/m³ (sem formato LaTeX)
+        (r'N/m³', 'N/m³'),
+        # m³ (sem formato LaTeX)
+        (r'(?<!\^)\bm³\b', 'm³'),
+        # PV = incompleta (apenas PV = na linha)
+        (r'\$\s*PV\s*=\s*\$', 'PV = incompleta'),
+        # Equacoes incompletas (= no final de linha com $)
+        (r'\$\s*=\s*\$', 'equacao incompleta'),
+        # nRT sem formato LaTeX
+        (r'\bnRT\b', 'nRT'),
+        # rho sem escape correto em contexto de formula
+        (r'\$[^$]*\\rho\b(?!_|\{)', 'rho sem escape'),
+        # epsilon sem escape em formula
+        (r'\$[^$]*\\epsilon\b(?!_|\{)', 'epsilon sem escape'),
+        # gamma_r ou gamma sozinho mas não como variável
+        (r'\\gamma(?!\w)', 'gamma'),
     ]
 
     for i, line in enumerate(lines, 1):
@@ -407,27 +413,19 @@ def fix_formulas_via_temp_file(
     with open(broken_file, 'r', encoding='utf-8') as f:
         broken_content = f.read()
 
-    # Criar prompt para API - formato simples para cada bloco
-    prompt = """FOR EACH BLOCK below:
-1. Replace "@@ BROKEN: <text>" with "@@ FIXED: <corrected_text>"
-2. Keep all other lines exactly the same
+    # Criar prompt para API - mais simples e direto
+    # Limitar a primeiroas 10 formulas para evitar timeout
+    broken_lines = broken_content.split('=== LINHA')
+    if len(broken_lines) > 12:  # Limit to ~10 formulas
+        broken_lines = broken_lines[:12]
+        broken_content = '=== LINHA'.join(broken_lines)
 
-Example:
-Input:
-=== LINHA 10 ===
-9: previous line
-@@ BROKEN: kgf/m³
-11: next line
+    prompt = f"""For each block below, replace BROKEN with FIXED.
+Keep context lines unchanged.
 
-Output:
-=== LINHA 10 ===
-9: previous line
-@@ FIXED: $kgf/m^3$
-11: next line
+{broken_content}
 
-NOW DO THE SAME FOR ALL BLOCKS BELOW. Output ONLY the corrected blocks, nothing else:
-
-""" + broken_content
+Return with @@ FIXED: <corrected> for each block."""
 
     try:
         print(f"      @ Correcao de formulas via API...", flush=True)
@@ -457,6 +455,223 @@ NOW DO THE SAME FOR ALL BLOCKS BELOW. Output ONLY the corrected blocks, nothing 
         return {}
 
 
+def fix_formulas_with_pdf_context(
+    pdf_path: str,
+    markdown_content: str,
+    output_dir: str
+) -> str:
+    """
+    Corrige formulas usando regex (sem API para ser mais rapido).
+    Aplica correcoes conhecidas automaticamente.
+
+    Args:
+        pdf_path: Caminho do PDF original
+        markdown_content: Conteudo Markdown com formulas
+        output_dir: Diretorio para arquivos temporarios
+
+    Returns:
+        Markdown com formulas corrigidas
+    """
+    import re as regex_module
+
+    print(f"      @ Corrigindo formulas (regex)...", flush=True)
+
+    # Lista de correcoes regex (pattern, replacement)
+    corrections = [
+        # gammar -> gamma_r
+        (r'\\gammar(?!\w)', r'\\gamma_r'),
+        # kgf/m³ -> kgf/m^3
+        (r'kgf/m³', 'kgf/m^3'),
+        # N/m³ -> N/m^3
+        (r'N/m³', 'N/m^3'),
+        # m³ -> m^3 (mas não em contextos como m³/s)
+        (r'(?<!\w)m³(?!\^)', 'm^3'),
+    ]
+
+    result = markdown_content
+    total_fixes = 0
+
+    for pattern, replacement in corrections:
+        matches = regex_module.findall(pattern, result)
+        if matches:
+            count = len(matches)
+            total_fixes += count
+            result = regex_module.sub(pattern, replacement, result)
+            print(f"      i {pattern[:25]:25} -> {replacement[:15]:15} ({count}x)", flush=True)
+
+    if total_fixes > 0:
+        print(f"      + {total_fixes} correcoes aplicadas", flush=True)
+    else:
+        print(f"      i Nenhuma correcao necessaria", flush=True)
+
+    return result
+
+
+def _fix_formulas_single_call(
+    pdf_path: str,
+    markdown_content: str,
+    pdf_text: str
+) -> str:
+    """Processa formulas em uma unica chamada API."""
+    import re as regex_module
+    from app.utils.api_formula_converter import get_api_converter
+
+    api = get_api_converter()
+    if not api.is_available():
+        print(f"      ! API nao disponivel", flush=True)
+        return markdown_content
+
+    # Aumentar timeout
+    api.config.timeout = 120
+
+    # Criar prompt com PDF + MD
+    prompt = f"""Você é um especialista em revisar e corrigir fórmulas matemáticas em Markdown.
+
+Analise o Markdown com fórmulas e compare com o texto de referência do PDF quando disponível.
+Corrigir TODOS os problemas encontrados nas fórmulas:
+
+REGRAS:
+1. Fórmulas inline ($...$): NÃO usar \frac{{}}{{}}, usar / (ex: $kgf/m^3$)
+2. Fórmulas block ($$...$$): PODE usar \frac{{}}{{}} normalmente
+3. \gammar → \gamma_r (gama subscrito r)
+4. kgf/m³ → kgf/m^3
+5. N/m³ → N/m^3
+6. m³ → m^3
+7. Símbolos gregos: \gamma, \rho, \epsilon, \alpha, etc.
+8. Equações incompletas (ex: "PV = " ou "n = ") devem ser completadas se houver contexto
+
+Retornar APENAS o Markdown corrigido, sem explicações.
+
+---
+
+TEXTO DO PDF (referência - primeiros 10000 chars):
+{pdf_text[:10000]}...
+
+---
+
+MARKDOWN COM FÓRMULAS (corrigir):
+{markdown_content}
+
+---
+
+Retorne APENAS o Markdown corrigido:"""
+
+    try:
+        print(f"      @ Corrigindo formulas (chamada unica)...", flush=True)
+        response = api._make_request(
+            system_prompt="Você é um especialista em corrigir fórmulas matemáticas em Markdown.",
+            user_prompt=prompt
+        )
+
+        # Limpar resposta
+        response = regex_module.sub(r'<think>.*?</think>', '', response, flags=regex_module.DOTALL).strip()
+
+        # Se a resposta parece ser markdown válido, usar
+        if response and len(response) > len(markdown_content) * 0.5:
+            print(f"      + Formulas corrigidas via API", flush=True)
+            return response
+        else:
+            print(f"      ! Resposta API invalida, mantendo original", flush=True)
+            return markdown_content
+
+    except Exception as e:
+        print(f"      ! Erro na API: {e}", flush=True)
+        return markdown_content
+
+
+def _fix_formulas_chunked(
+    pdf_path: str,
+    markdown_content: str,
+    output_dir: str,
+    pdf_text: str
+) -> str:
+    """Processa formulas em múltiplos chunks quando texto é muito grande."""
+    import re as regex_module
+    from app.utils.api_formula_converter import get_api_converter
+
+    api = get_api_converter()
+    if not api.is_available():
+        print(f"      ! API nao disponivel", flush=True)
+        return markdown_content
+
+    # Aumentar timeout para API
+    api.config.timeout = 120
+
+    # Dividir MD em chunks (aproximadamente 10k tokens cada)
+    lines = markdown_content.split('\n')
+    chunks = []
+    current_chunk_lines = []
+    current_chars = 0
+    CHUNK_SIZE = 35000  # ~8-10k tokens
+
+    for line in lines:
+        current_chunk_lines.append(line)
+        current_chars += len(line)
+
+        if current_chars >= CHUNK_SIZE:
+            chunks.append('\n'.join(current_chunk_lines))
+            current_chunk_lines = []
+            current_chars = 0
+
+    if current_chunk_lines:
+        chunks.append('\n'.join(current_chunk_lines))
+
+    print(f"      i Processando {len(chunks)} chunks...", flush=True)
+
+    # Criar tasks.md se muitos chunks
+    tasks_file = os.path.join(output_dir, 'formula_fix_tasks.md')
+    if len(chunks) > 3:
+        with open(tasks_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Tarefas de Correção de Fórmulas\n\n")
+            f.write(f"Total de chunks: {len(chunks)}\n\n")
+            for i, chunk in enumerate(chunks, 1):
+                f.write(f"## Chunk {i}\n")
+                f.write(f"Caracteres: {len(chunk)}\n\n")
+
+    result_chunks = []
+    for i, chunk in enumerate(chunks, 1):
+        print(f"      @ Processando chunk {i}/{len(chunks)}...", flush=True)
+
+        prompt = f"""Você é um especialista em revisar e corrigir fórmulas matemáticas em Markdown.
+
+Analise o chunk de Markdown com fórmulas e corrija todos os problemas:
+
+REGRAS:
+1. Fórmulas inline ($...$): NÃO usar \frac{{}}{{}}, usar / (ex: $kgf/m^3$)
+2. Fórmulas block ($$...$$): PODE usar \frac{{}}{{}}
+3. \gammar → \gamma_r
+4. kgf/m³ → kgf/m^3
+5. N/m³ → N/m^3
+6. m³ → m^3
+
+MARKDOWN (corrigir):
+{chunk}
+
+Retorne APENAS o Markdown corrigido:"""
+
+        try:
+            response = api._make_request(
+                system_prompt="Você é um especialista em corrigir fórmulas matemáticas.",
+                user_prompt=prompt
+            )
+            response = regex_module.sub(r'<think>.*?</think>', '', response, flags=regex_module.DOTALL).strip()
+            result_chunks.append(response)
+        except Exception as e:
+            print(f"      ! Erro no chunk {i}: {e}", flush=True)
+            result_chunks.append(chunk)
+
+    # Unir chunks
+    final_result = '\n'.join(result_chunks)
+
+    # Limpar tasks.md se existir
+    if len(chunks) > 3 and os.path.exists(tasks_file):
+        os.remove(tasks_file)
+        print(f"      i Tasks file removido", flush=True)
+
+    print(f"      + Formulas corrigidas ({len(chunks)} chunks)", flush=True)
+    return final_result
+
+
 def merge_formula_fixes(
     text: str,
     fixed_file: str,
@@ -464,6 +679,7 @@ def merge_formula_fixes(
 ) -> str:
     """
     Faz merge das correcoes de formulas de volta ao texto original.
+    Implementa logica inline vs block para fracoes.
 
     Args:
         text: Texto original
@@ -473,42 +689,122 @@ def merge_formula_fixes(
     Returns:
         Texto com correcoes aplicadas
     """
+    import re as regex_module
+
     if not os.path.exists(fixed_file):
         return text
-
-    import re as regex_module
 
     # Carregar fixed file
     with open(fixed_file, 'r', encoding='utf-8') as f:
         fixed_content = f.read()
 
-    # Simpler: apenas aplicar known corrections diretamente no texto
-    # Isso evita problemas de mapeamento de linhas
+    # Parse fixed content to extract line number -> fixed text mappings
+    # Format: === LINHA XX (tipo) === ... @@ FIXED: corrected_text
+    line_fixes = {}
+    current_line = None
+
+    for line in fixed_content.split('\n'):
+        # Detect line header: === LINHA 49 (tipo) ===
+        match = regex_module.match(r'=== LINHA (\d+)', line)
+        if match:
+            current_line = int(match.group(1))
+        # Detect @@ FIXED: corrected_text
+        elif current_line and line.strip().startswith('@@ FIXED:'):
+            fixed_text = line.replace('@@ FIXED:', '').strip()
+            line_fixes[current_line] = fixed_text
+
+    if not line_fixes:
+        # Fallback: apply hardcoded corrections if API failed
+        print(f"      i API falhou, usando correcoes hardcoded", flush=True)
+        result = _apply_hardcoded_corrections(text)
+        return result
+
+    # Apply fixes to text
+    lines = text.split('\n')
+    fixes_applied = 0
+
+    for i, line in enumerate(lines):
+        line_num = i + 1
+        if line_num in line_fixes:
+            fixed_text = line_fixes[line_num]
+            if fixed_text:
+                # Apply inline vs block logic
+                corrected_line = _apply_inline_vs_block_logic(line, fixed_text)
+                lines[i] = corrected_line
+                fixes_applied += 1
+
+    print(f"      i {fixes_applied} correcoes aplicadas do arquivo fixed", flush=True)
+    return '\n'.join(lines)
+
+
+def _apply_inline_vs_block_logic(original_line: str, fixed_text: str) -> str:
+    """
+    Aplica lógica inline vs block para frações.
+
+    - Inline ($...$): usa / em vez de \frac{}{}
+    - Block ($$...$$): usa \frac{}{} normalmente
+
+    Args:
+        original_line: Linha original
+        fixed_text: Texto corrigido pela API
+
+    Returns:
+        Linha com lógica inline/block aplicada
+    """
+    import re as regex_module
+
+    if not fixed_text:
+        return original_line
+
+    # Check if line is block math ($$...$$)
+    is_block = '$$' in original_line
+
+    # Apply inline vs block logic to fractions
+    if is_block:
+        # Block math: fractions OK, use \frac{}{}
+        # But if fixed has /, convert to \frac{}{} for block
+        fixed_text = _convert_fraction_to_frac(fixed_text)
+    else:
+        # Inline math: convert \frac{}{} to / for simpler notation
+        fixed_text = _convert_frac_to_slash(fixed_text)
+
+    return fixed_text
+
+
+def _convert_fraction_to_frac(text: str) -> str:
+    """Converte frações simples para \\frac{}{} em texto de block."""
+    import re as regex_module
+    # Simple fractions: a/b -> \frac{a}{b}
+    # Only for units like kgf/m^3 -> \frac{kgf}{m^3}
+    pattern = r'(\w+)/(\w+)'
+    return regex_module.sub(pattern, r'\\frac{\1}{\2}', text)
+
+
+def _convert_frac_to_slash(text: str) -> str:
+    """Converte \\frac{}{} para / em texto inline."""
+    import re as regex_module
+    # \frac{num}{den} -> num/den
+    pattern = r'\\frac\{([^}]+)\}\{([^}]+)\}'
+    return regex_module.sub(r'\1/\2', text)
+
+
+def _apply_hardcoded_corrections(text: str) -> str:
+    """Aplica correções hardcoded quando API falha."""
+    import re as regex_module
+
     corrections = [
-        # (pattern, replacement)
-        (r'\\gammar(?!\w)', r'\\gamma_r'),  # \gammar -> \gamma_r
-        (r'kgf/m³', 'kgf/m^3'),
-        (r'N/m³', 'N/m^3'),
-        (r'PV\s*=\s*$', 'PV = nRT'),  # Complete PV = equation
+        # (pattern, replacement, flags)
+        (r'\\gammar(?!\w)', r'\\gamma_r', 0),
+        (r'kgf/m³', r'kgf/m^3', 0),
+        (r'N/m³', r'N/m^3', 0),
+        (r'm³', r'm^3', 0),
     ]
 
-    # Flags for each pattern (same order as corrections)
-    correction_flags = [0, 0, 0, regex_module.MULTILINE]
-
     result = text
-
-    # Debug: check if patterns match
-    debug_pattern = r'PV\s*=\s*$'
-    if regex_module.search(debug_pattern, result, regex_module.MULTILINE):
-        print(f"      i DEBUG: PV pattern MATCHES in result", flush=True)
-    else:
-        print(f"      i DEBUG: PV pattern does NOT match", flush=True)
-
-    for i, (pattern, replacement) in enumerate(corrections):
-        flags = correction_flags[i]
-        matches = regex_module.findall(pattern, result, flags)
+    for pattern, replacement, flags in corrections:
+        matches = regex_module.findall(pattern, result)
         if matches:
-            print(f"      i Aplicando: {pattern} -> {replacement} ({len(matches)} matches)", flush=True)
+            print(f"      i Aplicando: {pattern[:20]} -> {replacement[:20]} ({len(matches)} matches)", flush=True)
             result = regex_module.sub(pattern, replacement, result, flags=flags)
 
     return result
@@ -1621,27 +1917,14 @@ def process_pdf(pdf_path: str, output_dir: str) -> Tuple[str, str]:
     markdown_content = re.sub(r"[ \t]+\n", "\n", markdown_content)
 
     # ============================================================
-    # CORRECAO DE FORMULAS VIA TEMP FILES
+    # CORRECAO DE FORMULAS USANDO PDF COMO REFERENCIA
     # ============================================================
-    print(f"\n   @ Detectando formulas quebradas...", flush=True)
-    broken = detect_broken_formulas(markdown_content)
-
-    if broken:
-        print(f"      # {len(broken)} formulas quebradas detectadas", flush=True)
-        # Criar arquivos temporarios
-        broken_file, fixed_file = create_temp_files(
-            broken, markdown_content, output_dir, pdf_name, context_lines=3
-        )
-        print(f"      # Arquivos temporarios criados", flush=True)
-
-        # Corrigir via API
-        fix_formulas_via_temp_file(broken_file, fixed_file, pdf_name)
-
-        # Merge das correcoes
-        markdown_content = merge_formula_fixes(markdown_content, fixed_file, broken_file)
-        print(f"      + Fórmulas corrigidas", flush=True)
-    else:
-        print(f"      i Nenhuma formula quebrada detectada", flush=True)
+    print(f"\n   @ Corrigindo formulas com referencia do PDF...", flush=True)
+    markdown_content = fix_formulas_with_pdf_context(
+        pdf_path=pdf_path,
+        markdown_content=markdown_content,
+        output_dir=output_dir
+    )
 
     # Salvar Markdown
     md_filename = f"{pdf_name}.md"
@@ -1932,27 +2215,14 @@ def _process_text_parallel(
         markdown_content = re.sub(r"[ \t]+\n", "\n", markdown_content)
 
         # ============================================================
-        # CORRECAO DE FORMULAS VIA TEMP FILES
+        # CORRECAO DE FORMULAS USANDO PDF COMO REFERENCIA
         # ============================================================
-        print(f"      @ Detectando formulas quebradas...", flush=True)
-        broken = detect_broken_formulas(markdown_content)
-
-        if broken:
-            print(f"      # {len(broken)} formulas quebradas detectadas", flush=True)
-            # Criar arquivos temporarios
-            broken_file, fixed_file = create_temp_files(
-                broken, markdown_content, output_dir, pdf_name, context_lines=3
-            )
-            print(f"      # Arquivos temporarios criados", flush=True)
-
-            # Corrigir via API
-            fix_formulas_via_temp_file(broken_file, fixed_file, pdf_name)
-
-            # Merge das correcoes
-            markdown_content = merge_formula_fixes(markdown_content, fixed_file, broken_file)
-            print(f"      + Fórmulas corrigidas", flush=True)
-        else:
-            print(f"      i Nenhuma formula quebrada detectada", flush=True)
+        print(f"      @ Corrigindo formulas com referencia do PDF...", flush=True)
+        markdown_content = fix_formulas_with_pdf_context(
+            pdf_path=pdf_path,
+            markdown_content=markdown_content,
+            output_dir=output_dir
+        )
 
         # Salvar Markdown individual
         md_filename = f"{pdf_name}.md"

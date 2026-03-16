@@ -246,6 +246,10 @@ class APIFormulaConverter:
                 user_prompt=user_prompt
             )
 
+            # Limpar resposta - remover thinking blocks
+            import re
+            response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+
             # Parsear resposta
             result = self._parse_response(response)
 
@@ -562,8 +566,8 @@ Return ONLY the converted formulas, one per line, in the same order."""
                     user_prompt=batch_prompt
                 )
 
-                # Limpar resposta
-                response = re.sub(r'<think>.*?', '', response, flags=re.DOTALL).strip()
+                # Limpar resposta (remover thinking blocks)
+                response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
                 if response.startswith("```"):
                     lines = response.split('\n')
                     response = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
