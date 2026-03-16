@@ -290,8 +290,8 @@ def detect_broken_formulas(text: str) -> List[Tuple[int, str, str]]:
     problems = [
         # gammar (deveria ser gamma_r)
         (r'\\gammar', 'gammar -> gamma_r'),
-        # PV = sem lado direito
-        (r'PV\\s*=\\s*$', 'PV = (incompleta)'),
+        # PV = sem lado direito (sem backslash)
+        (r'PV\s*=\s*$', 'PV = (incompleta)'),
         # nRT sem formato de equacao
         (r'\\bnRT\\b', 'nRT sem $'),
         # fracoes quebradas como kgf/m³ (sem formatar)
@@ -486,16 +486,30 @@ def merge_formula_fixes(
     # Isso evita problemas de mapeamento de linhas
     corrections = [
         # (pattern, replacement)
-        (r'\\gammar(?!\w)', r'\\gamma_r'),  # \gammar (not followed by word char) -> \gamma_r
+        (r'\\gammar(?!\w)', r'\\gamma_r'),  # \gammar -> \gamma_r
         (r'kgf/m³', 'kgf/m^3'),
         (r'N/m³', 'N/m^3'),
+        (r'PV\s*=\s*$', 'PV = nRT'),  # Complete PV = equation
     ]
 
+    # Flags for each pattern (same order as corrections)
+    correction_flags = [0, 0, 0, regex_module.MULTILINE]
+
     result = text
-    for pattern, replacement in corrections:
-        if regex_module.search(pattern, result):
-            print(f"      i Aplicando: {pattern} -> {replacement}", flush=True)
-            result = regex_module.sub(pattern, replacement, result)
+
+    # Debug: check if patterns match
+    debug_pattern = r'PV\s*=\s*$'
+    if regex_module.search(debug_pattern, result, regex_module.MULTILINE):
+        print(f"      i DEBUG: PV pattern MATCHES in result", flush=True)
+    else:
+        print(f"      i DEBUG: PV pattern does NOT match", flush=True)
+
+    for i, (pattern, replacement) in enumerate(corrections):
+        flags = correction_flags[i]
+        matches = regex_module.findall(pattern, result, flags)
+        if matches:
+            print(f"      i Aplicando: {pattern} -> {replacement} ({len(matches)} matches)", flush=True)
+            result = regex_module.sub(pattern, replacement, result, flags=flags)
 
     return result
 
