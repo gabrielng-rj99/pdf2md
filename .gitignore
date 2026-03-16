@@ -157,3 +157,7 @@ dist/
 build/
 *.egg-info/
 site-packages/
+
+# Local test scripts
+test_minimax.py
+test_run.py
