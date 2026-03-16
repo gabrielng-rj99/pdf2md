@@ -253,7 +253,7 @@ def _filter_repeated_headers_footers(blocks: List[Dict]) -> List[Dict]:
 
     # Identificar padrões repetidos (aparecem em múltiplas páginas)
     text_by_page: Dict[str, set] = {}
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
         # Normalizar texto para comparação (remover números no final, que podem ser página)
         text_norm = re.sub(r'\s+\d{1,3}\s*$', '', block["text"].strip().lower())
         text_norm = re.sub(r'\s+', ' ', text_norm)  # Normalizar espaços
@@ -267,7 +267,7 @@ def _filter_repeated_headers_footers(blocks: List[Dict]) -> List[Dict]:
 
     # Filtrar blocos
     filtered = []
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
         text = block["text"].strip()
         page_num = block.get("page", 0)
 
@@ -461,6 +461,79 @@ def _clean_fragmented_formula(text: str) -> str:
     # O usuário pediu para não tentar reconstruir o que não funciona
     return text
 
+
+def _should_use_llm_for_formulas(text: str) -> bool:
+    """
+    Decide se deve usar LLM para corrigir fórmulas no texto.
+    
+    Usa LLM para TODAS as fórmulas matemáticas para garantir conversão
+    completa para LaTeX de alta qualidade.
+    
+    Args:
+        text: Texto a verificar
+        
+    Returns:
+        True se deve usar LLM, False para usar apenas detector local
+    """
+    if not text or len(text) > 500:
+        # Textos muito longos provavelmente são parágrafos, não fórmulas
+        return False
+    
+    # Detectar QUALQUER fórmula matemática
+    formula_patterns = [
+        # Letras gregas (indicadores fortes de fórmula)
+        r'[αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]',
+        
+        # Caracteres Unicode privados (usados por PDFs com fontes customizadas para símbolos matemáticos)
+        # Range U+F000-U+F0FF é comum para símbolos em PDFs
+        r'[\uf000-\uf0ff]',
+        
+        # Símbolos matemáticos
+        r'[∞∑∏∫∂∇√±×÷≤≥≠≈∈∉⊂⊃∪∩∧∨¬→←↔⇒⇐⇔∀∃∄]',
+        
+        # Subscritos e superscritos Unicode
+        r'[₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₔₕₖₗₘₙₚₛₜ⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ]',
+        
+        # Operadores matemáticos com contexto
+        r'[a-zA-Z]\s*[=＋\-\*/^]\s*[a-zA-Z0-9]',
+        
+        # Frações tipo a/b
+        r'\w+\s*/\s*\w+',
+        
+        # Funções matemáticas
+        r'\b(sen|cos|tan|log|ln|exp|lim|max|min|sin|sqrt|raiz)\b',
+        
+        # Símbolos matemáticos Unicode (funções, variáveis)
+        r'[ƒ𝑓𝑔𝑥𝑦𝑧𝑎𝑏𝑐𝑛𝑚𝑘𝐴𝐵𝐶]',
+        
+        # Parênteses com conteúdo matemático
+        r'\([^)]{2,20}\)\s*[=＋]',
+        
+        # Números com unidades
+        r'\d+\s*[a-zA-Z/²³]+\s*[=＋]',
+    ]
+    
+    # Contar quantos padrões de fórmula aparecem
+    formula_score = 0
+    for pattern in formula_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            formula_score += 1
+    
+    # Se tem pelo menos 2 indicadores ou caracteres matemáticos específicos, é fórmula
+    if formula_score >= 2:
+        return True
+    
+    # Se tem letras gregas isoladas, é quase certamente fórmula
+    if re.search(r'[αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]', text):
+        return True
+    
+    # Fórmulas fragmentadas (letras isoladas)
+    words = text.split()
+    isolated_letters = len([w for w in words if len(w) == 1 and w.isalpha()])
+    if len(words) > 2 and isolated_letters >= 2:
+        return True
+    
+    return False
 
 def _detect_heading_level(text: str, font_size: float, is_bold: bool, all_font_sizes: List[float]) -> int:
     """
@@ -666,7 +739,7 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
     # Usar detector de listas
     list_detector = _list_detector
 
-    def _finalize_paragraph():
+    def _finalize_paragraph(block_index: int = -1):
         """Finaliza o parágrafo atual e processa listas inline."""
         nonlocal current_paragraph
         if current_paragraph:
@@ -681,11 +754,40 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
                     elif paragraphs and paragraphs[-1] != "":
                         paragraphs.append("")
             else:
-                # Processar fórmulas no parágrafo usando detector heurístico
+                # Processar fórmulas com detector local primeiro
                 paragraph_text = formula_detector.process_text(paragraph_text)
-                paragraphs.append(paragraph_text)
-            current_paragraph = []
+                
+                # Verificar se precisa de LLM para converter fórmulas
+                needs_llm = _should_use_llm_for_formulas(paragraph_text)
 
+                if needs_llm:
+                    from app.utils.api_formula_converter import get_api_converter
+                    api_converter = get_api_converter()
+                    if api_converter.is_available():
+                        try:
+                            # Coletar contexto (texto dos blocos anterior e posterior)
+                            context_before = ""
+                            context_after = ""
+                            if block_index > 0:
+                                prev_blocks = blocks[max(0, block_index-3):block_index]
+                                context_before = " ".join([b["text"].strip() for b in prev_blocks])
+                            if block_index < len(blocks) - 1:
+                                next_blocks = blocks[block_index+1:min(len(blocks), block_index+4)]
+                                context_after = " ".join([b["text"].strip() for b in next_blocks])
+
+                            # Usar batch processing com chunking automático
+                            paragraph_text, api_calls = api_converter.fix_paragraphs_batch(
+                                paragraph_text,
+                                context_before=context_before,
+                                context_after=context_after
+                            )
+                            if api_calls > 0:
+                                print(f"      🤖 Processado: {api_calls} chamada(s) API", flush=True)
+                        except Exception as e:
+                            logger.warning(f"API batch falhou, usando detector local: {e}")
+                            pass
+                
+                paragraphs.append(paragraph_text)
     def _finalize_list():
         """Finaliza a lista atual."""
         nonlocal current_list_items, in_list
@@ -696,7 +798,7 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
             current_list_items = []
         in_list = False
 
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
         text = block["text"].strip()
 
         # Limpar artefatos de PDF (números de página, headers parciais, etc.)
@@ -710,11 +812,11 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
         if _is_garbage_text(text):
             continue
 
-        # Detectar e tratar fórmulas fragmentadas
-        if _is_fragmented_formula(text):
-            text = _clean_fragmented_formula(text)
-            if not text:
-                continue
+        # DESATIVADO: Não remover fórmulas fragmentadas. O LLM contextual tentará consertá-las.
+        # if _is_fragmented_formula(text):
+        #     text = _clean_fragmented_formula(text)
+        #     if not text:
+        #         continue
 
         font_size = block["font_size"]
         is_bold = bool(block["font_flags"] & 2**4)  # Flag de negrito
@@ -723,10 +825,23 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
         if list_detector.is_list_item(text):
             # Finalizar parágrafo anterior se houver
             if current_paragraph:
-                _finalize_paragraph()
+                _finalize_paragraph(block_index)
 
             # Formatar item de lista
             formatted_item = list_detector.format_list_item(text)
+
+            # Processar fórmulas no item de lista também
+            formatted_item = formula_detector.process_text(formatted_item)
+            if _should_use_llm_for_formulas(formatted_item):
+                from app.utils.api_formula_converter import get_api_converter
+                api_converter = get_api_converter()
+                if api_converter.is_available():
+                    try:
+                        # Usar batch processing para listas também
+                        formatted_item, api_calls = api_converter.fix_paragraphs_batch(formatted_item)
+                    except Exception as e:
+                        logger.warning(f"API batch falhou para lista: {e}")
+            
             current_list_items.append(formatted_item)
             in_list = True
             last_font_size = font_size
@@ -774,7 +889,7 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
         # Se for heading, finalizar parágrafo anterior
         if is_heading:
             if current_paragraph:
-                _finalize_paragraph()
+                _finalize_paragraph(block_index)
 
             # Detectar nível do heading
             level = _detect_heading_level(text, font_size, is_bold, all_font_sizes)
@@ -808,7 +923,7 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
         if formula_detector.is_formula_line(text):
             # Finalizar parágrafo anterior
             if current_paragraph:
-                _finalize_paragraph()
+                _finalize_paragraph(block_index)
 
             # Processar e adicionar fórmula como bloco
             formatted = formula_detector.format_formula_block(text)
@@ -833,7 +948,7 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
             should_break = True
 
         if should_break and current_paragraph:
-            _finalize_paragraph()
+            _finalize_paragraph(block_index)
 
         # Adicionar texto ao parágrafo atual
         current_paragraph.append(text)
@@ -846,7 +961,7 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
 
     # Adicionar último parágrafo
     if current_paragraph:
-        _finalize_paragraph()
+        _finalize_paragraph(block_index)
 
     return paragraphs
 
@@ -1239,6 +1354,9 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
 
     # SEGUNDA PASSAGEM: processar texto de TODOS os PDFs
     print("\n📝 Processando texto de todos os PDFs...")
+    total_pages_all = sum(fitz.open(p).page_count for p in pdf_paths)
+    print(f"   Total de páginas a processar: {total_pages_all}")
+    
     for pdf_index, pdf_path in enumerate(pdf_paths):
         doc = fitz.open(pdf_path)
         pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
@@ -1250,7 +1368,11 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
         md_lines.append(f"# {pdf_name}")
         md_lines.append("")
 
+        print(f"\n   📄 {pdf_name}.pdf ({len(doc)} páginas):")
+        
         for page_num, page in enumerate(doc, start=1):  # type: ignore
+            print(f"      Página {page_num}/{len(doc)}...", end=" ", flush=True)
+            
             # Extrair blocos de texto estruturados
             blocks = extract_text_blocks_from_page(page, page_num)
 
@@ -1280,6 +1402,8 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
                 md_lines.append("")
                 md_lines.append("---")
                 md_lines.append("")
+            
+            print("✓")
 
         doc.close()
 
