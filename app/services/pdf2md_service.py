@@ -1009,13 +1009,15 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
             else:
                 # Processar fórmulas com detector local primeiro
                 paragraph_text = formula_detector.process_text(paragraph_text)
-                
+
                 # Verificar se precisa de LLM para converter fórmulas
                 needs_llm = _should_use_llm_for_formulas(paragraph_text)
 
                 # Não chamar API aqui - será feito em lote depois no _fix_formulas_in_pdf
 
                 paragraphs.append(paragraph_text)
+            # IMPORTANTE: Limpar current_paragraph após adicionar ao paragraphs
+            current_paragraph = []
     def _finalize_list():
         """Finaliza a lista atual."""
         nonlocal current_list_items, in_list
@@ -1182,14 +1184,6 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
     # Adicionar último parágrafo
     if current_paragraph:
         _finalize_paragraph(block_index)
-
-    # REMOVER PARÁGRAFOS DUPLICADOS CONSECUTIVOS ( workaround para bug de duplicação )
-    if paragraphs:
-        deduped = [paragraphs[0]]
-        for p in paragraphs[1:]:
-            if p != deduped[-1]:
-                deduped.append(p)
-        paragraphs = deduped
 
     return paragraphs
 
@@ -1670,10 +1664,9 @@ def _process_text_parallel(
         markdown_content = re.sub(r"[ \t]+\n", "\n", markdown_content)
 
         # Salvar Markdown individual
-        # CORRIGIR FÓRMULAS EM LOTE (uma única chamada API para todo o PDF)
-        print(f"      🔧 Corrigindo fórmulas do PDF...", flush=True)
-        markdown_content = _fix_formulas_in_pdf(markdown_content, pdf_name)
-        # ========== FIM DA CORREÇÃO DE FÓRMULAS ==========
+        # DESABILITADO: correção de fórmulas via API (para debugging)
+        # print(f"      🔧 Corrigindo fórmulas do PDF...", flush=True)
+        # markdown_content = _fix_formulas_in_pdf(markdown_content, pdf_name)
 
         # Salvar Markdown individual
         md_filename = f"{pdf_name}.md"
