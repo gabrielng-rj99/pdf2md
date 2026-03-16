@@ -2,6 +2,7 @@ import os
 import re
 import zipfile
 from typing import List, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor
 import fitz
 from app.utils.image_filter import ImageFilter
 from app.utils.image_reference_mapper import ImageReferenceMapper
@@ -14,6 +15,258 @@ import io
 from collections import Counter
 
 logger = logging.getLogger(__name__)
+
+# Max parallel PDFs to process (default: 4)
+MAX_PARALLEL_PDFS = int(os.getenv('MAX_PARALLEL_PDFS', '4'))
+
+
+# =============================================================================
+# FORMULA COLLECTION - Two-phase approach for better performance
+# =============================================================================
+
+class FormulaCollector:
+    """
+    Coleta fórmulas quebradas durante o processamento do PDF.
+    Ao final, faz uma única chamada API para corrigir todas.
+    """
+
+    def __init__(self):
+        self.formulas: List[Tuple[str, int, int, str]] = []  # (formula_text, start, end, page_context)
+        self.pdf_name = ""
+        self.total_pages = 0
+
+    def add_formula(self, formula: str, start: int, end: int, page_context: str = ""):
+        """Adiciona uma fórmula quebrada à coleção."""
+        self.formulas.append((formula, start, end, page_context))
+
+    def has_formulas(self) -> bool:
+        return len(self.formulas) > 0
+
+    def fix_all(self, pdf_text: str) -> str:
+        """
+        Faz uma única chamada API para corrigir todas as fórmulas do PDF.
+
+        Args:
+            pdf_text: Texto completo do PDF com fórmulas marcadas
+
+        Returns:
+            Texto com fórmulas corrigidas
+        """
+        if not self.has_formulas():
+            return pdf_text
+
+        from app.utils.api_formula_converter import get_api_converter
+        api_converter = get_api_converter()
+
+        if not api_converter.is_available():
+            logger.warning("API não disponível para correção de fórmulas")
+            return pdf_text
+
+        # Extrair todas as fórmulas únicas
+        unique_formulas = list(set(f[0] for f in self.formulas))
+
+        print(f"      📦 Coletadas {len(unique_formulas)} fórmulas únicas para correção", flush=True)
+
+        # Criar prompt com todas as fórmulas
+        formulas_text = "\n".join(f"{i+1}. {f}" for i, f in enumerate(unique_formulas))
+
+        prompt = f"""You are a mathematical formula fixer. Fix all formulas in the text below.
+
+The text contains mathematical formulas that need to be converted to proper LaTeX format.
+Return the COMPLETE fixed text with all formulas converted.
+
+Formulas to fix (for reference):
+{formulas_text}
+
+Full text:
+{pdf_text}
+
+Return the complete fixed text:"""
+
+        try:
+            # Uma única chamada API para todo o PDF
+            print(f"      🔄 Fazendo chamada API única para {len(unique_formulas)} fórmulas...", flush=True)
+
+            response = api_converter._make_request(
+                system_prompt="You are a mathematical formula fixer. Convert formulas to proper LaTeX.",
+                user_prompt=prompt
+            )
+
+            # Limpar resposta
+            response = re.sub(r'<think>.*?', '', response, flags=re.DOTALL).strip()
+            if response.startswith("```"):
+                lines = response.split('\n')
+                response = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
+
+            print(f"      ✅ Fórmulas corrigidas com sucesso", flush=True)
+            return response
+
+        except Exception as e:
+            logger.error(f"Erro ao corrigir fórmulas: {e}")
+            print(f"      ⚠️ Erro ao corrigir fórmulas: {e}", flush=True)
+            return pdf_text
+
+
+def collect_page_formulas(text: str, page_num: int) -> List[str]:
+    """
+    Coleta todas as fórmulas quebradas de uma página.
+
+    Args:
+        text: Texto da página
+        page_num: Número da página
+
+    Returns:
+        Lista de fórmulas quebradas
+    """
+    from app.utils.api_formula_converter import get_api_converter
+
+    try:
+        api_converter = get_api_converter()
+        snippets = api_converter._extract_formula_snippets(text)
+        return [s[0] for s in snippets]
+    except:
+        return []
+
+
+def _fix_formulas_in_pdf(markdown_text: str, pdf_name: str) -> str:
+    """
+    Corrige todas as fórmulas de um PDF com uma única chamada API.
+
+    Args:
+        markdown_text: Texto Markdown completo do PDF
+        pdf_name: Nome do PDF (para logging)
+
+    Returns:
+        Texto com fórmulas corrigidas
+    """
+    from app.utils.api_formula_converter import get_api_converter
+
+    api_converter = get_api_converter()
+
+    if not api_converter.is_available():
+        print(f"      ⚠️ API não disponível, mantendo fórmulas originais", flush=True)
+        return markdown_text
+
+    # Extrair todas as fórmulas do texto
+    try:
+        snippets = api_converter._extract_formula_snippets(markdown_text)
+
+        if not snippets:
+            print(f"      ℹ️ Nenhuma fórmula detectada", flush=True)
+            return markdown_text
+
+        # Obter fórmulas únicas
+        unique_formulas = list(dict.fromkeys(s[0] for s in snippets))
+        print(f"      📦 {len(unique_formulas)} fórmulas únicas detectadas", flush=True)
+
+        if len(unique_formulas) > 50:
+            # Se muitas fórmulas, dividir em chunks de 10
+            print(f"      📦 Muitas fórmulas ({len(unique_formulas)}), processando em chunks...", flush=True)
+            chunks = [unique_formulas[i:i+10] for i in range(0, len(unique_formulas), 10)]
+            results = []
+
+            for i, chunk in enumerate(chunks):
+                print(f"         🔄 Chunk {i+1}/{len(chunks)} ({len(chunk)} fórmulas)...", end=" ", flush=True)
+                chunk_result = _fix_formulas_chunk(chunk, api_converter, markdown_text)
+                results.append(chunk_result)
+                print(f"✓", flush=True)
+
+            # Combinar resultados
+            result = markdown_text
+            for chunk_result in results:
+                result = _apply_formula_fixes(result, chunk_result)
+
+            return result
+        else:
+            # Poucas fórmulas - uma única chamada
+            print(f"      🔄 Fazendo chamada API única para {len(unique_formulas)} fórmulas...", flush=True)
+            result = _fix_formulas_chunk(unique_formulas, api_converter, markdown_text)
+            print(f"      ✅ Fórmulas corrigidas", flush=True)
+            return result
+
+    except Exception as e:
+        logger.error(f"Erro ao corrigir fórmulas: {e}")
+        print(f"      ⚠️ Erro ao corrigir fórmulas: {e}", flush=True)
+        return markdown_text
+
+
+def _fix_formulas_chunk(formulas: List[str], api_converter, original_text: str) -> Dict[str, str]:
+    """
+    Faz uma chamada API para corrigir um chunk de fórmulas.
+
+    Args:
+        formulas: Lista de fórmulas a corrigir
+        api_converter: Instância do conversor API
+        original_text: Texto original para contexto
+
+    Returns:
+        Dicionário {formula_original: formula_corrigida}
+    """
+    import time
+
+    formulas_text = "\n".join(f"{i+1}. {f}" for i, f in enumerate(formulas))
+
+    prompt = f"""You are a mathematical formula fixer.
+
+Fix ALL mathematical formulas in the text below.
+Return the COMPLETE text with ALL formulas converted to proper LaTeX.
+
+Examples:
+- ρ → \\rho
+- γ → \\gamma
+- x² → x^{{2}}
+- f(x) = 2x + 1 → $f(x) = 2x + 1$
+- α = β → $\\alpha = \\beta$
+
+Formulas to fix (for reference):
+{formulas_text}
+
+Full text:
+{original_text[:3000]}... (truncated for API)
+
+Return the complete fixed text with LaTeX:"""
+
+    try:
+        start_time = time.time()
+        response = api_converter._make_request(
+            system_prompt="You are a mathematical formula fixer. Convert formulas to proper LaTeX format.",
+            user_prompt=prompt
+        )
+
+        # Limpar resposta
+        import re
+        response = re.sub(r'<think>.*?', '', response, flags=re.DOTALL).strip()
+        if response.startswith("```"):
+            lines = response.split('\n')
+            response = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
+
+        elapsed = time.time() - start_time
+        print(f"✓ ({elapsed:.1f}s)", flush=True)
+
+        # Criar mapping das fórmulas
+        # Simplificado: retornar o texto corrigido para aplicar
+        return {"_full_text": response, "_original": original_text}
+
+    except Exception as e:
+        logger.error(f"Erro no chunk de fórmulas: {e}")
+        raise
+
+
+def _apply_formula_fixes(original_text: str, fixes: Dict[str, str]) -> str:
+    """
+    Aplica as correções de fórmulas ao texto original.
+
+    Args:
+        original_text: Texto original
+        fixes: Dicionário com correções
+
+    Returns:
+        Texto com correções aplicadas
+    """
+    if "_full_text" in fixes:
+        # Retornar o texto completo corrigido
+        return fixes["_full_text"]
+    return original_text
 
 
 def calculate_image_hash(image_path: str) -> str:
@@ -760,33 +1013,8 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
                 # Verificar se precisa de LLM para converter fórmulas
                 needs_llm = _should_use_llm_for_formulas(paragraph_text)
 
-                if needs_llm:
-                    from app.utils.api_formula_converter import get_api_converter
-                    api_converter = get_api_converter()
-                    if api_converter.is_available():
-                        try:
-                            # Coletar contexto (texto dos blocos anterior e posterior)
-                            context_before = ""
-                            context_after = ""
-                            if block_index > 0:
-                                prev_blocks = blocks[max(0, block_index-3):block_index]
-                                context_before = " ".join([b["text"].strip() for b in prev_blocks])
-                            if block_index < len(blocks) - 1:
-                                next_blocks = blocks[block_index+1:min(len(blocks), block_index+4)]
-                                context_after = " ".join([b["text"].strip() for b in next_blocks])
+                # Não chamar API aqui - será feito em lote depois no _fix_formulas_in_pdf
 
-                            # Usar batch processing com chunking automático
-                            paragraph_text, api_calls = api_converter.fix_paragraphs_batch(
-                                paragraph_text,
-                                context_before=context_before,
-                                context_after=context_after
-                            )
-                            if api_calls > 0:
-                                print(f"      🤖 Processado: {api_calls} chamada(s) API", flush=True)
-                        except Exception as e:
-                            logger.warning(f"API batch falhou, usando detector local: {e}")
-                            pass
-                
                 paragraphs.append(paragraph_text)
     def _finalize_list():
         """Finaliza a lista atual."""
@@ -830,17 +1058,9 @@ def consolidate_text_blocks(blocks: List[Dict]) -> List[str]:
             # Formatar item de lista
             formatted_item = list_detector.format_list_item(text)
 
-            # Processar fórmulas no item de lista também
+            # Processar fórmulas no item de lista também (sem API agora - será corrigido depois)
             formatted_item = formula_detector.process_text(formatted_item)
-            if _should_use_llm_for_formulas(formatted_item):
-                from app.utils.api_formula_converter import get_api_converter
-                api_converter = get_api_converter()
-                if api_converter.is_available():
-                    try:
-                        # Usar batch processing para listas também
-                        formatted_item, api_calls = api_converter.fix_paragraphs_batch(formatted_item)
-                    except Exception as e:
-                        logger.warning(f"API batch falhou para lista: {e}")
+            # Não chamar API aqui - será feito em lote depois
             
             current_list_items.append(formatted_item)
             in_list = True
@@ -1283,81 +1503,117 @@ def create_zip_export(output_dir: str, pdf_name: str) -> str:
         raise
 
 
-def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
+def _extract_images_from_pdf(
+    pdf_path: str,
+    pdf_index: int,
+    output_dir: str,
+) -> Tuple[int, Dict[int, List[str]]]:
     """
-    Processa múltiplos PDFs com todas as imagens consolidadas em uma única pasta.
-    Gera Markdowns separados para cada PDF e um ZIP único com tudo.
+    Extrai todas as imagens de um único PDF (thread-safe).
 
-    Características:
-    - Processa múltiplos PDFs sequencialmente
-    - Todas as imagens são salvas em uma única pasta "images/"
-    - Detecta duplicatas globalmente (entre todos os PDFs)
-    - Gera um arquivo Markdown por PDF
-    - Cria um ZIP consolidado com todos os Markdowns e imagens
+    Args:
+        pdf_path: Caminho do arquivo PDF
+        pdf_index: Índice do PDF na lista (para identificação)
+        output_dir: Diretório de saída para imagens
+
+    Returns:
+        Tupla com (pdf_index, page_images) onde page_images é {page_num: [img_paths]}
+    """
+    if not os.path.exists(pdf_path):
+        raise ValueError(f"Arquivo PDF não encontrado: {pdf_path}")
+
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        raise ValueError(f"Erro ao abrir PDF {pdf_path}: {e}")
+
+    pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    page_images: Dict[int, List[str]] = {}
+
+    print(f"\n   📄 {pdf_name}.pdf ({len(doc)} páginas)")
+
+    # Extrair imagens de todas as páginas deste PDF
+    for page_num, page in enumerate(doc, start=1):  # type: ignore
+        images = extract_images_from_page(doc, page, page_num, output_dir, pdf_name)
+        if images:
+            page_images[page_num] = images
+            print(f"      Página {page_num}: {len(images)} imagens extraídas")
+
+    doc.close()
+    return pdf_index, page_images
+
+
+def _extract_images_parallel(
+    pdf_paths: List[str],
+    output_dir: str,
+    max_workers: int = 4,
+) -> Dict[int, Dict[int, List[str]]]:
+    """
+    Extrai imagens de múltiplos PDFs em paralelo usando ThreadPoolExecutor.
+
+    Args:
+        pdf_paths: Lista de caminhos dos arquivos PDF
+        output_dir: Diretório de saída para imagens
+        max_workers: Número máximo de threads (padrão: 4)
+
+    Returns:
+        Dicionário no formato {pdf_index: {page_num: [img_paths]}}
+    """
+    all_page_images: Dict[int, Dict[int, List[str]]] = {}
+
+    # Usar mínimo entre max_workers e número de PDFs
+    workers = min(max_workers, len(pdf_paths)) if pdf_paths else 1
+
+    print(f"\n🖼️  Extraindo imagens de todos os PDFs em paralelo ({workers} threads)...")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Submeter todas as tarefas
+        futures = {
+            executor.submit(_extract_images_from_pdf, pdf_path, pdf_index, output_dir): pdf_index
+            for pdf_index, pdf_path in enumerate(pdf_paths)
+        }
+
+        # Coletar resultados na ordem de conclusão
+        for future in futures:
+            pdf_index, page_images = future.result()
+            all_page_images[pdf_index] = page_images
+
+    # Ordenar pelo índice do PDF para manter a ordem
+    all_page_images = dict(sorted(all_page_images.items()))
+
+    total_images = sum(
+        len(images)
+        for page_imgs in all_page_images.values()
+        for images in page_imgs.values()
+    )
+    print(f"\n✓ Total de imagens extraídas: {total_images}")
+
+    return all_page_images
+
+
+def _process_text_parallel(
+    pdf_paths: List[str],
+    all_page_images: Dict[int, Dict[int, List[str]]],
+    image_mapper: "ImageReferenceMapper",
+    output_dir: str,
+    max_workers: int = 4,
+) -> List[Tuple[str, str]]:
+    """
+    Processa o texto de múltiplos PDFs em paralelo usando ThreadPoolExecutor.
 
     Args:
         pdf_paths: Lista de caminhos para os PDFs
-        output_dir: Diretório onde salvar tudo
+        all_page_images: Dicionário de {pdf_index: {page_num: [images]}}
+        image_mapper: Mapeador de referências de imagens (compartilhado)
+        output_dir: Diretório onde salvar os arquivos MD
+        max_workers: Número máximo de threads (padrão 4)
 
     Returns:
-        Nome do arquivo ZIP consolidado
+        Lista de tuplas (pdf_name, md_path)
     """
-    logger.info(f"Starting multiple PDF processing: {len(pdf_paths)} files")
-
-    if not pdf_paths or len(pdf_paths) == 0:
-        raise ValueError("Nenhum arquivo PDF fornecido.")
-
-    os.makedirs(output_dir, exist_ok=True)
-    img_dir = os.path.join(output_dir, "images")
-    os.makedirs(img_dir, exist_ok=True)
-
-    # Inicializar componentes
-    image_mapper = ImageReferenceMapper()
-    md_files = []  # Lista de (nome_pdf, caminho_md)
-    total_images_extracted = 0
-    all_page_images = {}  # {pdf_index: {page_num: [images]}}
-    referenced_images = []
-
-    print("\n📚 Processando múltiplos PDFs...")
-    print(f"   Total de arquivos: {len(pdf_paths)}")
-
-    # PRIMEIRA PASSAGEM: extrair TODAS as imagens de TODOS os PDFs
-    print("\n🖼️  Extraindo imagens de todos os PDFs...")
-    for pdf_index, pdf_path in enumerate(pdf_paths):
-        if not os.path.exists(pdf_path):
-            raise ValueError(f"Arquivo PDF não encontrado: {pdf_path}")
-
-        try:
-            doc = fitz.open(pdf_path)
-        except Exception as e:
-            raise ValueError(f"Erro ao abrir PDF {pdf_path}: {e}")
-
-        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
-        page_images = {}
-
-        print(f"\n   📄 {pdf_name}.pdf ({len(doc)} páginas)")
-
-        # Extrair imagens de todas as páginas deste PDF
-        for page_num, page in enumerate(doc, start=1):  # type: ignore
-            images = extract_images_from_page(doc, page, page_num, output_dir, pdf_name)
-            if images:
-                page_images[page_num] = images
-                total_images_extracted += len(images)
-                for img_path in images:
-                    image_mapper.add_image(page_num, img_path)
-                print(f"      Página {page_num}: {len(images)} imagens extraídas")
-
-        all_page_images[pdf_index] = page_images
-        doc.close()
-
-    print(f"\n✓ Total de imagens extraídas: {total_images_extracted}")
-
-    # SEGUNDA PASSAGEM: processar texto de TODOS os PDFs
-    print("\n📝 Processando texto de todos os PDFs...")
-    total_pages_all = sum(fitz.open(p).page_count for p in pdf_paths)
-    print(f"   Total de páginas a processar: {total_pages_all}")
-    
-    for pdf_index, pdf_path in enumerate(pdf_paths):
+    def process_single_pdf(args: Tuple[int, str]) -> Tuple[str, str]:
+        """Processa o texto de um único PDF."""
+        pdf_index, pdf_path = args
         doc = fitz.open(pdf_path)
         pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
         page_images = all_page_images.get(pdf_index, {})
@@ -1369,10 +1625,10 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
         md_lines.append("")
 
         print(f"\n   📄 {pdf_name}.pdf ({len(doc)} páginas):")
-        
+
         for page_num, page in enumerate(doc, start=1):  # type: ignore
             print(f"      Página {page_num}/{len(doc)}...", end=" ", flush=True)
-            
+
             # Extrair blocos de texto estruturados
             blocks = extract_text_blocks_from_page(page, page_num)
 
@@ -1387,13 +1643,6 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
                 image_mapper
             )
 
-            # Rastrear imagens referenciadas
-            for line in page_content:
-                if "![" in line and "](" in line:
-                    match = re.search(r'\]\(([^)]+)\)', line)
-                    if match:
-                        referenced_images.append(match.group(1))
-
             # Adicionar ao markdown
             md_lines.extend(page_content)
 
@@ -1402,7 +1651,7 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
                 md_lines.append("")
                 md_lines.append("---")
                 md_lines.append("")
-            
+
             print("✓")
 
         doc.close()
@@ -1413,14 +1662,91 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
         markdown_content = re.sub(r"[ \t]+\n", "\n", markdown_content)
 
         # Salvar Markdown individual
+        # CORRIGIR FÓRMULAS EM LOTE (uma única chamada API para todo o PDF)
+        print(f"      🔧 Corrigindo fórmulas do PDF...", flush=True)
+        markdown_content = _fix_formulas_in_pdf(markdown_content, pdf_name)
+        # ========== FIM DA CORREÇÃO DE FÓRMULAS ==========
+
+        # Salvar Markdown individual
         md_filename = f"{pdf_name}.md"
         md_path = os.path.join(output_dir, md_filename)
 
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(markdown_content.strip())
 
-        md_files.append((pdf_name, md_filename, md_path))
         print(f"   ✓ {md_filename} criado")
+        return (pdf_name, md_path)
+
+    # Processar todos os PDFs em paralelo
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(process_single_pdf, enumerate(pdf_paths)))
+
+    return results
+
+
+def process_multiple_pdfs(pdf_paths: List[str], output_dir: str, max_workers: int = MAX_PARALLEL_PDFS) -> str:
+    """
+    Processa múltiplos PDFs com todas as imagens consolidadas em uma única pasta.
+    Gera Markdowns separados para cada PDF e um ZIP único com tudo.
+
+    Características:
+    - Processa múltiplos PDFs em paralelo
+    - Todas as imagens são salvas em uma única pasta "images/"
+    - Detecta duplicatas globalmente (entre todos os PDFs)
+    - Gera um arquivo Markdown por PDF
+    - Cria um ZIP consolidado com todos os Markdowns e imagens
+
+    Args:
+        pdf_paths: Lista de caminhos para os PDFs
+        output_dir: Diretório onde salvar tudo
+        max_workers: Número máximo de threads para processamento paralelo (padrão: 4)
+
+    Returns:
+        Nome do arquivo ZIP consolidado
+    """
+    logger.info(f"Starting multiple PDF processing: {len(pdf_paths)} files with {max_workers} workers")
+
+    if not pdf_paths or len(pdf_paths) == 0:
+        raise ValueError("Nenhum arquivo PDF fornecido.")
+
+    os.makedirs(output_dir, exist_ok=True)
+    img_dir = os.path.join(output_dir, "images")
+    os.makedirs(img_dir, exist_ok=True)
+
+    # Inicializar componentes
+    image_mapper = ImageReferenceMapper()
+    referenced_images = []
+
+    print("\n📚 Processando múltiplos PDFs...")
+    print(f"   Total de arquivos: {len(pdf_paths)}")
+
+    # PRIMEIRA PASSAGEM: extrair TODAS as imagens de TODOS os PDFs (paralelo)
+    all_page_images = _extract_images_parallel(pdf_paths, output_dir, max_workers)
+
+    # SEGUNDA PASSAGEM: processar texto de TODOS os PDFs (paralelo)
+    print("\n📝 Processando texto de todos os PDFs...")
+    total_pages_all = sum(fitz.open(p).page_count for p in pdf_paths)
+    print(f"   Total de páginas a processar: {total_pages_all}")
+
+    md_files = _process_text_parallel(
+        pdf_paths,
+        all_page_images,
+        image_mapper,
+        output_dir,
+        max_workers
+    )
+
+    # Coletar imagens referenciadas dos arquivos markdown gerados
+    print("\n🔗 Coletando referências de imagens...")
+    for pdf_name, md_path in md_files:
+        if os.path.exists(md_path):
+            with open(md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Extrair referências de imagens do markdown
+            if "![" in content and "](" in content:
+                matches = re.findall(r'\]\(([^)]+)\)', content)
+                referenced_images.extend(matches)
+    print(f"   ✓ {len(referenced_images)} imagens referenciadas encontradas")
 
     # Detectar e remover imagens duplicadas (rodapés/cabeçalhos)
     print("\n🧹 Detectando imagens duplicadas em todos os PDFs...")
@@ -1459,7 +1785,8 @@ def process_multiple_pdfs(pdf_paths: List[str], output_dir: str) -> str:
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # Adicionar todos os Markdowns
-            for pdf_name, md_filename, md_path in md_files:
+            for pdf_name, md_path in md_files:
+                md_filename = f"{pdf_name}.md"
                 if os.path.exists(md_path):
                     zipf.write(md_path, arcname=md_filename)
                     print(f"   ✓ Adicionado: {md_filename}")
