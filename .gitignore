@@ -119,7 +119,8 @@ dmypy.json
 .pyre/
 
 # Custom
-output/*
+output/
+test_fixtures/output/
 .pytest_cache/
 *.pyc
 .coverage*
@@ -147,9 +148,9 @@ deploy/certs/*.pem
 config/secrets/
 !deploy/.env
 
-# PDFs (except sample test files)
+# PDFs (except sample test files in test_fixtures)
 *.pdf
-!aula1.pdf
+!test_fixtures/samples/*.pdf
 
 # Build and coverage
 htmlcov/
@@ -164,3 +165,4 @@ test_run.py
 
 # AI Slop
 CLAUDE.md
+output_test
